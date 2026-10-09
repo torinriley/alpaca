@@ -2,11 +2,11 @@
 
 **Native language model inference for Apple Silicon.**
 
-A Swift-first inference runtime with custom Metal compute kernels, GGUF model loading and on-device autoregressive generation, built independently for macOS and iOS — no llama.cpp, MLX, Core ML, ONNX or Python at runtime.
+A Swift-first inference runtime with custom Metal compute kernels, GGUF model loading and on-device autoregressive generation, built independently for macOS and iOS, with no llama.cpp, MLX, Core ML, ONNX or Python at runtime.
 
 *Author: Torin Etheridge · 2026-10-09 · MIT License*
 
-> **Status — 0.1.0 (pre-release).** One architecture family (Llama-style decoder, byte-level BPE) and three weight formats (F16, Q8_0, Q4_0) are implemented and validated against PyTorch. All measurements were taken on a single machine (Apple M5, 16 GB). **Nothing has been run on a physical iPhone or iPad yet**; the library and example app compile for the iOS Simulator only.
+> **Status: 0.1.0 (pre-release).** One architecture family (Llama-style decoder, byte-level BPE) and three weight formats (F16, Q8_0, Q4_0) are implemented and validated against PyTorch. All measurements were taken on a single machine (Apple M5, 16 GB). **Nothing has been run on a physical iPhone or iPad yet**; the library and example app compile for the iOS Simulator only.
 
 ## Highlights
 
@@ -165,4 +165,4 @@ See also [`CITATION.cff`](CITATION.cff).
 
 ## License
 
-MIT © 2026 Torin Etheridge — see [LICENSE](LICENSE). The validation model is SmolLM2-135M-Instruct (Apache-2.0, HuggingFaceTB); GGUF conversions by bartowski. llama.cpp is used only as an external benchmark baseline and is not a dependency.
+MIT © 2026 Torin Etheridge. See [LICENSE](LICENSE). The validation model is SmolLM2-135M-Instruct (Apache-2.0, HuggingFaceTB); GGUF conversions by bartowski. llama.cpp is used only as an external benchmark baseline and is not a dependency.
