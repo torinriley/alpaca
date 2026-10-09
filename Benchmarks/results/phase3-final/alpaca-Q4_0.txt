@@ -1,0 +1,13 @@
+model SmolLM2-135M-Instruct-Q4_0.gguf | backend metal | load cold 0.056 s, warm 0.025 s
+
+prefill / decode by prompt length (median of 7; decode 64 tokens)
+prompt  prefill tok/s (min–max)        decode tok/s (min–max)         ttft ms   gpu ms/run
+   16      3061.0 (2992.3–3186.0, sd 59.0)       670.9 (665.6–672.9, sd 2.5)       5.3      98.4
+  128     18873.7 (18721.6–19566.0, sd 286.3)       606.5 (604.9–607.0, sd 0.8)       6.9     109.9
+  512     25798.7 (25475.1–25987.1, sd 179.5)       584.0 (581.1–587.8, sd 2.2)      19.9     126.9
+ 1024     22359.5 (22308.9–23252.1, sd 336.8)       550.9 (545.3–574.1, sd 9.6)      45.9     159.3
+ 2048     17427.3 (16986.7–18171.0, sd 412.7)       470.0 (450.8–502.9, sd 17.8)     117.6     250.9
+ 4096     12077.9 (11935.1–12593.8, sd 229.2)       394.6 (363.2–420.3, sd 21.2)     339.2     495.5
+
+peak footprint 192 MiB (resident 59 MiB) | process CPU use 0.06 cores | thermal nominal → nominal
+wrote Benchmarks/results/phase3-final/alpaca-Q4_0.json

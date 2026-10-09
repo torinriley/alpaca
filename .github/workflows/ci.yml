@@ -1,0 +1,25 @@
+# Copyright (c) 2026 Torin Etheridge. MIT License (see LICENSE).
+# Author: Torin Etheridge · 2026-10-09
+name: ci
+on: [push, pull_request]
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Build (debug + release)
+        run: |
+          swift build
+          swift build -c release
+      # Hosted runners have no model files and may have no usable GPU: real-model and Metal tests skip themselves.
+      # They are validated locally; see Docs/NUMERICAL_VALIDATION.md for the hardware they ran on.
+      - name: Unit tests
+        run: swift test
+  ios-build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build library for iOS Simulator
+        run: xcodebuild -scheme Alpaca -destination 'generic/platform=iOS Simulator' build

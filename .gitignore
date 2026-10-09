@@ -1,0 +1,13 @@
+# Copyright (c) 2026 Torin Etheridge. MIT License (see LICENSE).
+# Author: Torin Etheridge · 2026-10-09
+.build/
+.venv/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+Models/
+*.gguf
+*.safetensors
+__pycache__/
+.DS_Store
