@@ -129,7 +129,7 @@ public final class MetalLlamaSession: @unchecked Sendable {
     private let x: MTLBuffer, xn: MTLBuffer, q: MTLBuffer, k: MTLBuffer, v: MTLBuffer, ctx: MTLBuffer
     private let gate: MTLBuffer, up: MTLBuffer, logits: MTLBuffer, tokenBuffer: MTLBuffer
     /// Half-precision activations for the tensor-op GEMM path (nil when that path is unavailable).
-    private let xnHalf: MTLBuffer?, ctxHalf: MTLBuffer?, gateHalf: MTLBuffer?
+    private let xnHalf: MTLBuffer?, ctxHalf: MTLBuffer?, gateHalf: MTLBuffer?, qHalf: MTLBuffer?
     private let halfPathAvailable: Bool
     private let decodeScratch: MTLBuffer
     private let busy = NSLock()
@@ -174,6 +174,7 @@ public final class MetalLlamaSession: @unchecked Sendable {
         xnHalf = eligible ? try ctx0.makeBuffer(length: maxBatch * c.hiddenSize * 2) : nil
         ctxHalf = eligible ? try ctx0.makeBuffer(length: maxBatch * c.queryWidth * 2) : nil
         gateHalf = eligible ? try ctx0.makeBuffer(length: maxBatch * c.feedForwardSize * 2) : nil
+        qHalf = eligible ? try ctx0.makeBuffer(length: maxBatch * c.queryWidth * 2) : nil
         chainToken = try ctx0.makeBuffer(length: 16)
         chainEmitted = try ctx0.makeBuffer(length: (capacity + 8) * 4)
         guard let q = ctx0.device.makeCommandQueue() else { throw MetalError.commandFailed("could not create command queue") }
@@ -275,9 +276,10 @@ public final class MetalLlamaSession: @unchecked Sendable {
         // Chunks of at least `tensorGEMMMinTokens` tokens keep GEMM inputs in half precision end to end (norm, attention and
         // SwiGLU write half), halving activation traffic into the tensor-op GEMMs.
         let halfPath = halfPathAvailable && n >= KernelEncoder.tensorGEMMMinTokens
+        let tensorAttention = KernelEncoder.canUseTensorAttention(context: model.context, precision: gemmPrecision, kv: kvPrecision, headDim: c.headDim, tokens: n)
         let tiledAttention = kvPrecision == .float16 && n >= KernelEncoder.prefillAttentionMinTokens && (c.headDim == 64 || c.headDim == 128)
         for (i, l) in model.layers.enumerated() {
-            if halfPath, let xnH = xnHalf, let ctxH = ctxHalf, let gateH = gateHalf {
+            if halfPath, let xnH = xnHalf, let ctxH = ctxHalf, let gateH = gateHalf, let qH = qHalf {
                 try p.stage("rmsnorm").rmsNormToHalf(x, weight: l.attnNorm, out: xnH, rows: n, dim: h, eps: c.rmsNormEps)
                 let qkv = p.stage("qkv projections")
                 try qkv.projectHalf(l.wq, xHalf: xnH, y: q, tokens: n, accumulate: false)
@@ -287,7 +289,11 @@ public final class MetalLlamaSession: @unchecked Sendable {
                                                             heads: c.headCount, kvHeads: c.kvHeadCount, headDim: c.headDim,
                                                             startPosition: startPosition, tokens: n, kv: kvPrecision)
                 let att = p.stage("attention")
-                if tiledAttention {
+                if tensorAttention {
+                    try att.convertToHalf(q, out: qH, count: n * c.queryWidth)
+                    try att.attentionTensor(qHalf: qH, kCache: kCache[i], vCache: vCache[i], out: ctxH, outputHalf: true, heads: c.headCount,
+                                            kvHeads: c.kvHeadCount, headDim: c.headDim, startPosition: startPosition, tokens: n)
+                } else if tiledAttention {
                     try att.attention(q: q, kCache: kCache[i], vCache: vCache[i], out: ctxH, heads: c.headCount, kvHeads: c.kvHeadCount,
                                       headDim: c.headDim, startPosition: startPosition, tokens: n, kv: kvPrecision, outputHalf: true)
                 } else {

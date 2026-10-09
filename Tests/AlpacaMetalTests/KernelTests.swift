@@ -159,11 +159,13 @@ final class PrefillAttentionTests: XCTestCase {
             let q = try r([c.t, c.heads, c.hd], 1), k = try r([cap, c.kv, c.hd], 1), v = try r([cap, c.kv, c.hd], 1)
             let k16 = try k.converted(to: .float16).converted(to: .float32), v16 = try v.converted(to: .float16).converted(to: .float32)
             let cpu = try CPUOps.attentionApply(probs: CPUOps.softmax(CPUOps.attentionScores(q: q, keys: k16, length: cap, startPosition: c.start)), values: v16)
-            let gpu = try ops.attention(q: q, keys: k, values: v, startPosition: c.start)
-            let m = ErrorMetrics(actual: try gpu.toFloatArray(), expected: try cpu.toFloatArray().map(Double.init))
-            print("[metrics] GPU tiled attention T=\(c.t) start=\(c.start) H=\(c.heads)/\(c.kv) hd=\(c.hd): \(m)")
-            XCTAssertLessThan(m.maxAbs, 1.5e-3, "\(c)")
-            XCTAssertTrue(try gpu.toFloatArray().allSatisfy { $0.isFinite })
+            for precision in [GEMMPrecision.exact, .fast] where precision == .exact || ops.context.supportsTensorGEMM {
+                let gpu = try ops.attention(q: q, keys: k, values: v, startPosition: c.start, precision: precision)
+                let m = ErrorMetrics(actual: try gpu.toFloatArray(), expected: try cpu.toFloatArray().map(Double.init))
+                print("[metrics] GPU \(precision == .fast && c.t >= 16 ? "tensor-op" : "tiled") attention T=\(c.t) start=\(c.start) H=\(c.heads)/\(c.kv) hd=\(c.hd): \(m)")
+                XCTAssertLessThan(m.maxAbs, 1.5e-3, "\(c) \(precision)")
+                XCTAssertTrue(try gpu.toFloatArray().allSatisfy { $0.isFinite })
+            }
         }
     }
 }

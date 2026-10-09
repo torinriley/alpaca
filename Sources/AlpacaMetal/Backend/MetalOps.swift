@@ -174,7 +174,7 @@ public final class MetalOps: @unchecked Sendable {
     /// Full causal GQA attention as one kernel (online softmax). Keys/values are f32 on the way in and are
     /// rounded to f16 for the cache when `kv == .float16`, exactly as in the model path.
     /// q: [tokens, heads, headDim]; keys/values: [capacity, kvHeads, headDim]. Returns [tokens, heads, headDim].
-    public func attention(q: Tensor, keys: Tensor, values: Tensor, startPosition: Int, kv: KVPrecision = .float16) throws -> Tensor {
+    public func attention(q: Tensor, keys: Tensor, values: Tensor, startPosition: Int, kv: KVPrecision = .float16, precision: GEMMPrecision = .exact) throws -> Tensor {
         try requireF32(q, keys, values)
         guard q.rank == 3, keys.shape == values.shape, keys.rank == 3, keys.shape[2] == q.shape[2], q.shape[1] % keys.shape[1] == 0,
               q.shape[2] % 32 == 0, q.shape[2] <= 256, startPosition + q.shape[0] <= keys.shape[0]
@@ -189,6 +189,14 @@ public final class MetalOps: @unchecked Sendable {
         }
         let kb = try toCache(keys), vb = try toCache(values), qb = try buffer(q)
         let out = try context.makeBuffer(length: q.elementCount * 4)
+        if KernelEncoder.canUseTensorAttention(context: context, precision: precision, kv: kv, headDim: q.shape[2], tokens: q.shape[0]) {
+            let qh = try halfBuffer(q)
+            try run(precision: precision) {
+                try $0.attentionTensor(qHalf: qh, kCache: kb, vCache: vb, out: out, outputHalf: false, heads: q.shape[1], kvHeads: keys.shape[1],
+                                       headDim: q.shape[2], startPosition: startPosition, tokens: q.shape[0])
+            }
+            return try read(out, shape: q.shape)
+        }
         let scratch = try context.makeBuffer(length: KernelEncoder.decodeScratchBytes(heads: q.shape[1], kvHeads: keys.shape[1], headDim: q.shape[2], capacity: keys.shape[0]))
         try run {
             try $0.attention(q: qb, kCache: kb, vCache: vb, out: out, heads: q.shape[1], kvHeads: keys.shape[1],

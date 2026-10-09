@@ -175,7 +175,7 @@ struct KernelEncoder {
         encoder.setComputePipelineState(dp)
         encoder.setBuffer(w.buffer, offset: w.offset, index: 0); encoder.setBuffer(target!, offset: 0, index: 1)
         set(UInt32(w.cols), 2)
-        encoder.dispatchThreads(MTLSize(width: w.cols / 32, height: w.rows, depth: 1), threadsPerThreadgroup: MTLSize(width: min(w.cols / 32, 32), height: 8, depth: 1))
+        encoder.dispatchThreads(MTLSize(width: w.cols / 32 * 4, height: w.rows, depth: 1), threadsPerThreadgroup: MTLSize(width: min(w.cols / 32 * 4, 32), height: 8, depth: 1))
         return (target!, 0)
     }
 
@@ -267,6 +267,22 @@ struct KernelEncoder {
         encoder.dispatchThreadgroups(
             MTLSize(width: (w.rows + simdgroups - 1) / simdgroups, height: (tokens + tb - 1) / tb, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32 * simdgroups, height: 1, depth: 1))
+    }
+
+    /// Causal prefill attention on the tensor-op hardware (f16 KV cache, head dim 64/128). `qHalf` is the half copy of the queries;
+    /// the context vector is written as half (`outputHalf`) for the following tensor-op projection, or as float32.
+    func attentionTensor(qHalf: MTLBuffer, kCache: MTLBuffer, vCache: MTLBuffer, out: MTLBuffer, outputHalf: Bool,
+                         heads: Int, kvHeads: Int, headDim: Int, startPosition: Int, tokens: Int) throws {
+        let p = try context.pipeline("attn_tensor_hd\(headDim)" + (outputHalf ? "_oh" : ""))
+        encoder.setComputePipelineState(p)
+        encoder.setBuffer(qHalf, offset: 0, index: 0); encoder.setBuffer(kCache, offset: 0, index: 1)
+        encoder.setBuffer(vCache, offset: 0, index: 2); encoder.setBuffer(out, offset: 0, index: 3)
+        set(UInt32(heads), 4); set(UInt32(kvHeads), 5); set(UInt32(startPosition), 6); set(UInt32(tokens), 7)
+        encoder.dispatchThreadgroups(MTLSize(width: (tokens + 63) / 64, height: heads, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+    }
+
+    static func canUseTensorAttention(context: MetalContext, precision: GEMMPrecision, kv: KVPrecision, headDim: Int, tokens: Int) -> Bool {
+        precision == .fast && context.supportsTensorGEMM && kv == .float16 && (headDim == 64 || headDim == 128) && tokens >= tensorGEMMMinTokens
     }
 
     func rope(_ x: MTLBuffer, freqs: MTLBuffer, heads: Int, headDim: Int, startPosition: Int, tokens: Int) throws {

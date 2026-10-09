@@ -85,28 +85,29 @@ kernel void gemm_tensor_gateup_silu(device half* Wg [[buffer(0)]], device half* 
     }
 }
 
-// Expand quantised weight rows to half. One thread per 32-element block. Grid: (K / 32, N).
+// Expand quantised weight rows to half, 4 threads per 32-element block with vector loads/stores (196 GB/s measured vs 73 GB/s for
+// one thread per block). Grid: (K / 32 * 4, N).
 kernel void dequant_q8_0_to_half(device const uchar* W [[buffer(0)]], device half* out [[buffer(1)]],
                                  constant uint& K [[buffer(2)]], uint2 gid [[thread_position_in_grid]]) {
-    const uint nb = K / 32;
-    if (gid.x >= nb) return;
-    device const uchar* blk = W + ((ulong)gid.y * nb + gid.x) * 34;
+    const uint nb = K / 32, b = gid.x >> 2, part = gid.x & 3;       // part: elements [8*part, 8*part + 8) of the block
+    if (b >= nb) return;
+    device const uchar* blk = W + ((ulong)gid.y * nb + b) * 34;
     const float d = float(*(device const half*)blk);
-    device const char* q = (device const char*)(blk + 2);
-    device half* o = out + (ulong)gid.y * K + gid.x * 32;
-    for (uint j = 0; j < 32; j++) o[j] = half(d * float(q[j]));
+    device const packed_char4* q = (device const packed_char4*)(blk + 2 + part * 8);
+    device half4* o = (device half4*)(out + (ulong)gid.y * K + b * 32 + part * 8);
+    o[0] = half4(d * float4(q[0]));
+    o[1] = half4(d * float4(q[1]));
 }
 
 kernel void dequant_q4_0_to_half(device const uchar* W [[buffer(0)]], device half* out [[buffer(1)]],
                                  constant uint& K [[buffer(2)]], uint2 gid [[thread_position_in_grid]]) {
-    const uint nb = K / 32;
-    if (gid.x >= nb) return;
-    device const uchar* blk = W + ((ulong)gid.y * nb + gid.x) * 18;
+    const uint nb = K / 32, b = gid.x >> 2, part = gid.x & 3;       // part: bytes [4*part, 4*part + 4): low nibbles -> elements 4p.., high -> 16 + 4p..
+    if (b >= nb) return;
+    device const uchar* blk = W + ((ulong)gid.y * nb + b) * 18;
     const float d = float(*(device const half*)blk);
-    device const uchar* q = blk + 2;
-    device half* o = out + (ulong)gid.y * K + gid.x * 32;
-    for (uint j = 0; j < 16; j++) {
-        o[j] = half(d * float(int(q[j] & 0x0F) - 8));
-        o[j + 16] = half(d * float(int(q[j] >> 4) - 8));
-    }
+    device const packed_uchar4* qs = (device const packed_uchar4*)(blk + 2 + part * 4);
+    const uchar4 q = uchar4(*qs);
+    device half* base = out + (ulong)gid.y * K + b * 32;
+    *(device half4*)(base + part * 4) = half4(d * (float4(q & 0x0F) - 8.0f));
+    *(device half4*)(base + 16 + part * 4) = half4(d * (float4(q >> 4) - 8.0f));
 }
