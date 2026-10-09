@@ -3,7 +3,7 @@
 
 // Causal prefill attention on the GPU's matrix hardware (Metal 4 tensor ops; compiled in the tensor library, Apple10 GPUs).
 //
-// One threadgroup (4 simdgroups) handles a 64-query tile of one head and walks the KV cache in blocks of 64 positions:
+// One threadgroup (2 simdgroups, 64 threads) handles a 32-query tile of one head and walks the KV cache in blocks of 64 positions:
 //   S = Q·Kᵀ        tensor-op GEMM, Q and K read straight from device memory (K/V are strided views of the cache), S -> threadgroup
 //   softmax         two lanes per query row on S in threadgroup memory: online max / denominator, writes P as half and the
 //                   per-row rescale factor
@@ -12,14 +12,16 @@
 // No K/V staging: the tensor operation loads its operands itself, which is what made this 1.9x faster than the simdgroup-matrix
 // kernel (0.86 vs 1.61 ms per layer at 2048 tokens, 9 heads, head dim 64). Q is supplied as half; P, K and V are half; products
 // accumulate in float32 (relaxed-precision tensor ops). Edge tiles are handled by the tensor slices' bounds checks.
-// Grid: threadgroups = (ceil(tokens / 64), heads), 128 threads. Head dim 64 or 128.
+// Tile shape was chosen by sweeping (queries per tile, block length, simdgroups) at 4096 tokens: 32 x 64 x 2 simdgroups ran at 1.5 ms per
+// layer-call against 3.1 ms for 64 x 64 x 4 (the smaller threadgroup lets more of them be resident per core).
+// Grid: threadgroups = (ceil(tokens / 32), heads), 64 threads. Head dim 64 or 128.
 #include <metal_stdlib>
 #include <metal_tensor>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
 
-constant constexpr int AT_BQ = 64;     // query rows per threadgroup
+constant constexpr int AT_BQ = 32;     // query rows per threadgroup (2 simdgroups = 64 threads)
 constant constexpr int AT_BK = 64;     // KV positions per block
 constant constexpr float AT_NEG = -1.0e30f;
 
@@ -41,9 +43,9 @@ inline void attn_tensor_impl(device half* qh, device half* kc, device half* vc, 
     tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline> tP(sP, dextents<int32_t, 2>(AT_BK, AT_BQ));
 
     constexpr auto descS = matmul2d_descriptor(AT_BQ, AT_BK, HD, false, true, true);
-    matmul2d<descS, execution_simdgroups<4>> opS;
+    matmul2d<descS, execution_simdgroups<2>> opS;
     constexpr auto descO = matmul2d_descriptor(AT_BQ, HD, AT_BK, false, false, true, matmul2d_descriptor::mode::multiply_accumulate);
-    matmul2d<descO, execution_simdgroups<4>> opO;
+    matmul2d<descO, execution_simdgroups<2>> opO;
     auto cO = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(tV), float>();
     #pragma clang loop unroll(full)
     for (uint16_t i = 0; i < cO.get_capacity(); ++i) if (cO.is_valid_element(i)) cO[i] = 0.0f;

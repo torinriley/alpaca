@@ -278,7 +278,7 @@ struct KernelEncoder {
         encoder.setBuffer(qHalf, offset: 0, index: 0); encoder.setBuffer(kCache, offset: 0, index: 1)
         encoder.setBuffer(vCache, offset: 0, index: 2); encoder.setBuffer(out, offset: 0, index: 3)
         set(UInt32(heads), 4); set(UInt32(kvHeads), 5); set(UInt32(startPosition), 6); set(UInt32(tokens), 7)
-        encoder.dispatchThreadgroups(MTLSize(width: (tokens + 63) / 64, height: heads, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        encoder.dispatchThreadgroups(MTLSize(width: (tokens + 31) / 32, height: heads, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
     }
 
     static func canUseTensorAttention(context: MetalContext, precision: GEMMPrecision, kv: KVPrecision, headDim: Int, tokens: Int) -> Bool {
