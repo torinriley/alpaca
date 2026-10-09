@@ -71,7 +71,13 @@ A SwiftUI reference app (model picker, streaming, cancellation, throughput and m
 
 ## Results
 
-Apple M5 (10-core GPU), 16 GB, macOS 27.0, Swift 6.4. SmolLM2-135M-Instruct (30 layers, GQA 9/3, head dim 64). Median of 7 runs, 64 decoded tokens, greedy; llama.cpp build 11429 on the same GGUF files in the same run. Full grid (16–4096 tokens, three formats) and caveats — notably that the machine carried background load, so compare *within a row only* — in [Docs/PERFORMANCE.md](Docs/PERFORMANCE.md).
+Apple M5 (10-core GPU), 16 GB, macOS 27.0, Swift 6.4. SmolLM2-135M-Instruct (30 layers, GQA 9/3, head dim 64). Median of 7 runs, 64 decoded tokens, greedy; llama.cpp build 11429 on the same GGUF files in the same run. The machine carried background load during measurement, so compare *within a graph* rather than across runs; the method, the full numeric grid and the caveats are in [Docs/PERFORMANCE.md](Docs/PERFORMANCE.md), the raw data in [`Benchmarks/`](Benchmarks).
+
+![Prefill throughput](Docs/images/prefill-throughput.png)
+
+![Decode throughput versus context length](Docs/images/decode-throughput.png)
+
+![Speed-up from the Phase 3 optimisations](Docs/images/speedup.png)
 
 | Q8_0 | before optimisation | **alpaca.swift** | llama.cpp | alpaca / llama.cpp |
 |---|---|---|---|---|
