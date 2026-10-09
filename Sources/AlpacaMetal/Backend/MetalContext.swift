@@ -82,15 +82,18 @@ public final class MetalContext: @unchecked Sendable {
     /// (Apple10 family: M5 / A19). Returns nil elsewhere or if the OS toolchain cannot compile them; callers fall back
     /// to the simdgroup-matrix kernels. Set ALPACA_DISABLE_TENSOR_OPS=1 to force the fallback.
     static func compileTensorLibrary(device: MTLDevice) -> MTLLibrary? {
+        // Raw values keep this compiling against SDKs that predate the Apple10 GPU family (1010) and Metal 4.0
+        // (MTLLanguageVersion encodes major << 16 | minor); on such SDKs/OSes the tensor library is simply unavailable.
         guard ProcessInfo.processInfo.environment["ALPACA_DISABLE_TENSOR_OPS"] == nil,
-              device.supportsFamily(.apple10), #available(macOS 26.0, iOS 26.0, *),
+              let apple10 = MTLGPUFamily(rawValue: 1010), device.supportsFamily(apple10),
+              let metal4 = MTLLanguageVersion(rawValue: 4 << 16), #available(macOS 26.0, iOS 26.0, *),
               let dir = Bundle.module.url(forResource: "Kernels", withExtension: nil),
               let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path).filter({ $0.hasPrefix("tensor_") && $0.hasSuffix(".metal") }).sorted(),
               !files.isEmpty
         else { return nil }
         let source = files.compactMap { try? String(contentsOf: dir.appendingPathComponent($0), encoding: .utf8) }.joined(separator: "\n")
         let options = MTLCompileOptions()
-        options.languageVersion = .version4_0
+        options.languageVersion = metal4
         return try? device.makeLibrary(source: source, options: options)
     }
 
