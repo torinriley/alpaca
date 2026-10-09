@@ -6,7 +6,7 @@ A Swift-first inference runtime with custom Metal compute kernels, GGUF model lo
 
 *Author: Torin Etheridge · 2026-10-09 · MIT License*
 
-> **Status — 0.1 (development).** One architecture family (Llama-style decoder, byte-level BPE) and three weight formats (F16, Q8_0, Q4_0) are implemented and validated against PyTorch. All measurements were taken on a single machine (Apple M5, 16 GB). **Nothing has been run on a physical iPhone or iPad yet**; the library and example app compile for the iOS Simulator only.
+> **Status — 0.1.0 (pre-release).** One architecture family (Llama-style decoder, byte-level BPE) and three weight formats (F16, Q8_0, Q4_0) are implemented and validated against PyTorch. All measurements were taken on a single machine (Apple M5, 16 GB). **Nothing has been run on a physical iPhone or iPad yet**; the library and example app compile for the iOS Simulator only.
 
 ## Highlights
 
@@ -36,9 +36,9 @@ A Swift-first inference runtime with custom Metal compute kernels, GGUF model lo
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/torinriley/Alpaca.git", branch: "main")
+.package(url: "https://github.com/torinriley/alpaca.git", from: "0.1.0")
 // target dependency
-.product(name: "Alpaca", package: "Alpaca")
+.product(name: "Alpaca", package: "alpaca")
 ```
 
 ```swift
@@ -158,7 +158,7 @@ Precision work driven by an ablation of every reduced-precision site with a perp
   author = {Etheridge, Torin},
   title  = {alpaca.swift: Native language model inference for Apple Silicon},
   year   = {2026},
-  url    = {https://github.com/torinriley/Alpaca}
+  url    = {https://github.com/torinriley/alpaca}
 }
 ```
 See also [`CITATION.cff`](CITATION.cff).
