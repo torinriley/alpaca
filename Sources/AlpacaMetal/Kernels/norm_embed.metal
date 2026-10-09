@@ -28,6 +28,38 @@ kernel void rmsnorm_f32(device const float* x [[buffer(0)]], device const float*
     for (uint i = tid; i < dim; i += tgSize) orow[i] = xr[i] * scale * w[i];
 }
 
+// RMSNorm whose output is written as half: the activation format the tensor-op GEMM reads (half the memory traffic of float32;
+// the GEMM rounds float activations to half internally, so the arithmetic is identical).
+kernel void rmsnorm_f32_to_half(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
+                                device half* out [[buffer(2)]], constant uint& dim [[buffer(3)]],
+                                constant float& eps [[buffer(4)]],
+                                uint row [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]],
+                                uint tgSize [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                                uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float partial[32];
+    device const float* xr = x + (ulong)row * dim;
+    float ss = 0.0f;
+    for (uint i = tid; i < dim; i += tgSize) ss += xr[i] * xr[i];
+    ss = simd_sum(ss);
+    if (lane == 0) partial[sg] = ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        float v = lane < (tgSize / SIMD_WIDTH) ? partial[lane] : 0.0f;
+        v = simd_sum(v);
+        if (lane == 0) partial[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float scale = 1.0f / precise::sqrt(partial[0] / float(dim) + eps);
+    device half* orow = out + (ulong)row * dim;
+    for (uint i = tid; i < dim; i += tgSize) orow[i] = half(xr[i] * scale * w[i]);
+}
+
+// Elementwise float32 -> half conversion (fallback when a producer cannot write half directly).
+kernel void convert_f32_to_half(device const float* x [[buffer(0)]], device half* out [[buffer(1)]], constant uint& n [[buffer(2)]],
+                                uint i [[thread_position_in_grid]]) {
+    if (i < n) out[i] = half(x[i]);
+}
+
 // Embedding lookup: out[t, e] = dequant(table[tokens[t], e]). Grid: (dim, tokens). Token ids are validated on the host.
 kernel void embed_f16(device const int* tokens [[buffer(0)]], device const half* table [[buffer(1)]],
                       device float* out [[buffer(2)]], constant uint& dim [[buffer(3)]],

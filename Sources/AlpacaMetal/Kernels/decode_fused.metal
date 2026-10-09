@@ -21,7 +21,6 @@
 constant constexpr uint FLAG_NORM = 1;
 constant constexpr uint FLAG_SILU = 2;
 constant constexpr uint FLAG_ADD = 4;
-constant constexpr uint DEC_MAX_K = 4096;
 
 struct DecParams {
     uint K;

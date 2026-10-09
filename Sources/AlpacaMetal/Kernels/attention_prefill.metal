@@ -27,8 +27,8 @@ constant constexpr uint PF_SIMDGROUPS = 4;
 constant constexpr uint PF_ROWS_PER_SG = 16;  // two 8-row MMA tiles
 constant constexpr uint PF_TILE = PF_SIMDGROUPS * PF_ROWS_PER_SG;   // query tokens per threadgroup
 
-template <uint HD>
-inline void attn_prefill_impl(device const float* q, device const half* kc, device const half* vc, device float* out,
+template <uint HD, typename OUT>
+inline void attn_prefill_impl(device const float* q, device const half* kc, device const half* vc, device OUT* out,
                               uint heads, uint kvHeads, uint startPos, uint T,
                               uint2 tg, uint lane, uint sg, uint tid,
                               threadgroup half* sK, threadgroup half* sV,
@@ -169,24 +169,21 @@ inline void attn_prefill_impl(device const float* q, device const half* kc, devi
         for (uint d = 0; d < HD / 8; d++) {
             simdgroup_float8x8 z = simdgroup_float8x8(0.0f), res;
             simdgroup_multiply_accumulate(res, dm, o[i][d], z);
-            if (row0 + i * 8 + 7 < T) {
-                simdgroup_store(res, out + ((ulong)(row0 + i * 8) * heads + h) * HD + d * 8, heads * HD);
-            } else {
-                simdgroup_store(res, O, 8);
-                simdgroup_barrier(mem_flags::mem_threadgroup);
-                for (uint e = lane; e < 64; e += SIMD_WIDTH) {
-                    uint r = e / 8, c = e % 8, t = row0 + i * 8 + r;
-                    if (t < T) out[((ulong)t * heads + h) * HD + d * 8 + c] = O[e];
-                }
-                simdgroup_barrier(mem_flags::mem_threadgroup);
+            // Stage through an 8x8 threadgroup tile so rows >= T are never written and the output may be converted to OUT.
+            simdgroup_store(res, O, 8);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint e = lane; e < 64; e += SIMD_WIDTH) {
+                uint r = e / 8, c = e % 8, t = row0 + i * 8 + r;
+                if (t < T) out[((ulong)t * heads + h) * HD + d * 8 + c] = OUT(O[e]);
             }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
 }
 
-#define ATTN_PREFILL_KERNEL(NAME, HDV)                                                                         \
+#define ATTN_PREFILL_KERNEL(NAME, HDV, OUTT)                                                                    \
     kernel void NAME(device const float* q [[buffer(0)]], device const half* kc [[buffer(1)]],                  \
-                     device const half* vc [[buffer(2)]], device float* out [[buffer(3)]],                      \
+                     device const half* vc [[buffer(2)]], device OUTT* out [[buffer(3)]],                       \
                      constant uint& heads [[buffer(4)]], constant uint& kvHeads [[buffer(5)]],                  \
                      constant uint& startPos [[buffer(6)]], constant uint& T [[buffer(7)]],                     \
                      uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],        \
@@ -196,7 +193,9 @@ inline void attn_prefill_impl(device const float* q, device const half* kc, devi
         threadgroup float sS[PF_SIMDGROUPS * PF_ROWS_PER_SG * PF_BLOCK];                                        \
         threadgroup half sP[PF_SIMDGROUPS * PF_ROWS_PER_SG * PF_BLOCK];                                         \
         threadgroup float sD[PF_SIMDGROUPS * 128];                                                              \
-        attn_prefill_impl<HDV>(q, kc, vc, out, heads, kvHeads, startPos, T, tg, lane, sg, tid, sK, sV, sS, sP, sD); \
+        attn_prefill_impl<HDV, OUTT>(q, kc, vc, out, heads, kvHeads, startPos, T, tg, lane, sg, tid, sK, sV, sS, sP, sD); \
     }
-ATTN_PREFILL_KERNEL(attn_prefill_hd64_kv16, 64)
-ATTN_PREFILL_KERNEL(attn_prefill_hd128_kv16, 128)
+ATTN_PREFILL_KERNEL(attn_prefill_hd64_kv16, 64, float)
+ATTN_PREFILL_KERNEL(attn_prefill_hd128_kv16, 128, float)
+ATTN_PREFILL_KERNEL(attn_prefill_hd64_kv16_oh, 64, half)      // half output: feeds the tensor-op GEMM directly
+ATTN_PREFILL_KERNEL(attn_prefill_hd128_kv16_oh, 128, half)

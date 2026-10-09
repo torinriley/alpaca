@@ -128,6 +128,9 @@ public final class MetalLlamaSession: @unchecked Sendable {
     private let kCache: [MTLBuffer], vCache: [MTLBuffer]
     private let x: MTLBuffer, xn: MTLBuffer, q: MTLBuffer, k: MTLBuffer, v: MTLBuffer, ctx: MTLBuffer
     private let gate: MTLBuffer, up: MTLBuffer, logits: MTLBuffer, tokenBuffer: MTLBuffer
+    /// Half-precision activations for the tensor-op GEMM path (nil when that path is unavailable).
+    private let xnHalf: MTLBuffer?, ctxHalf: MTLBuffer?, gateHalf: MTLBuffer?
+    private let halfPathAvailable: Bool
     private let decodeScratch: MTLBuffer
     private let busy = NSLock()
     /// Own command queue per session: greedy chaining keeps several command buffers in flight, and independent queues keep
@@ -162,6 +165,15 @@ public final class MetalLlamaSession: @unchecked Sendable {
         up = try ctx0.makeBuffer(length: maxBatch * c.feedForwardSize * 4)
         logits = try ctx0.makeBuffer(length: c.vocabSize * 4)
         tokenBuffer = try ctx0.makeBuffer(length: capacity * 4)
+        // The half-activation prefill path needs every per-layer projection to be tensor-op eligible and (for quantised
+        // weights) the dequantisation scratch to exist.
+        let eligible = gemmPrecision == .fast && ctx0.supportsTensorGEMM
+            && model.layers.allSatisfy { l in [l.wq, l.wk, l.wv, l.wo, l.wGate, l.wUp, l.wDown].allSatisfy { $0.cols % 32 == 0 && ($0.dtype == .float16 || $0.dtype.isQuantized) } }
+            && (scratchBytes == 0 || dequantScratch != nil)
+        halfPathAvailable = eligible
+        xnHalf = eligible ? try ctx0.makeBuffer(length: maxBatch * c.hiddenSize * 2) : nil
+        ctxHalf = eligible ? try ctx0.makeBuffer(length: maxBatch * c.queryWidth * 2) : nil
+        gateHalf = eligible ? try ctx0.makeBuffer(length: maxBatch * c.feedForwardSize * 2) : nil
         chainToken = try ctx0.makeBuffer(length: 16)
         chainEmitted = try ctx0.makeBuffer(length: (capacity + 8) * 4)
         guard let q = ctx0.device.makeCommandQueue() else { throw MetalError.commandFailed("could not create command queue") }
@@ -260,7 +272,35 @@ public final class MetalLlamaSession: @unchecked Sendable {
     private func encodeChunk(_ p: EncoderProvider, tokens tokenSource: MTLBuffer, tokenOffset: Int, count n: Int, startPosition: Int, computeLogits: Bool) throws {
         let c = model.config, h = c.hiddenSize
         try p.stage("embed").embed(tokens: tokenSource, tokensOffset: tokenOffset * 4, table: model.embedding, out: x, count: n)
+        // Chunks of at least `tensorGEMMMinTokens` tokens keep GEMM inputs in half precision end to end (norm, attention and
+        // SwiGLU write half), halving activation traffic into the tensor-op GEMMs.
+        let halfPath = halfPathAvailable && n >= KernelEncoder.tensorGEMMMinTokens
+        let tiledAttention = kvPrecision == .float16 && n >= KernelEncoder.prefillAttentionMinTokens && (c.headDim == 64 || c.headDim == 128)
         for (i, l) in model.layers.enumerated() {
+            if halfPath, let xnH = xnHalf, let ctxH = ctxHalf, let gateH = gateHalf {
+                try p.stage("rmsnorm").rmsNormToHalf(x, weight: l.attnNorm, out: xnH, rows: n, dim: h, eps: c.rmsNormEps)
+                let qkv = p.stage("qkv projections")
+                try qkv.projectHalf(l.wq, xHalf: xnH, y: q, tokens: n, accumulate: false)
+                try qkv.projectHalf(l.wk, xHalf: xnH, y: k, tokens: n, accumulate: false)
+                try qkv.projectHalf(l.wv, xHalf: xnH, y: v, tokens: n, accumulate: false)
+                try p.stage("rope + kv store").ropeQKVStore(q: q, k: k, v: v, kCache: kCache[i], vCache: vCache[i], freqs: model.ropeFreqs,
+                                                            heads: c.headCount, kvHeads: c.kvHeadCount, headDim: c.headDim,
+                                                            startPosition: startPosition, tokens: n, kv: kvPrecision)
+                let att = p.stage("attention")
+                if tiledAttention {
+                    try att.attention(q: q, kCache: kCache[i], vCache: vCache[i], out: ctxH, heads: c.headCount, kvHeads: c.kvHeadCount,
+                                      headDim: c.headDim, startPosition: startPosition, tokens: n, kv: kvPrecision, outputHalf: true)
+                } else {
+                    try att.attention(q: q, kCache: kCache[i], vCache: vCache[i], out: ctx, heads: c.headCount, kvHeads: c.kvHeadCount,
+                                      headDim: c.headDim, startPosition: startPosition, tokens: n, kv: kvPrecision, decodeScratch: decodeScratch)
+                    try att.convertToHalf(ctx, out: ctxH, count: n * c.queryWidth)
+                }
+                try p.stage("attn out projection (+residual)").projectHalf(l.wo, xHalf: ctxH, y: x, tokens: n, accumulate: true)
+                try p.stage("rmsnorm").rmsNormToHalf(x, weight: l.ffnNorm, out: xnH, rows: n, dim: h, eps: c.rmsNormEps)
+                try p.stage("ffn gate+up+silu").gateUpSiluHalf(l.wGate, l.wUp, xHalf: xnH, outHalf: gateH, tokens: n)
+                try p.stage("ffn down (+residual)").projectHalf(l.wDown, xHalf: gateH, y: x, tokens: n, accumulate: true)
+                continue
+            }
             if [[l.wq, l.wk, l.wv], [l.wo], [l.wGate, l.wUp], [l.wDown]].allSatisfy({ KernelEncoder.canFuseDecode($0, tokens: n) }) {
                 // Single-token path: 6 dispatches per layer instead of 13 (norms, residuals, SiLU and RoPE folded into neighbours).
                 p.stage("qkv (fused norm)").decodeQKV(l.wq, l.wk, l.wv, x: x, norm: (l.attnNorm, c.rmsNormEps), q: q, k: k, v: v)

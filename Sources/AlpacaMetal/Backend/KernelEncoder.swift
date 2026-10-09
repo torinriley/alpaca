@@ -157,9 +157,14 @@ struct KernelEncoder {
         encoder.dispatchThreads(MTLSize(width: table.cols, height: count, depth: 1), threadsPerThreadgroup: MTLSize(width: min(table.cols, 64), height: 1, depth: 1))
     }
 
+    /// Whether the half-activation tensor-op GEMM can run `w` for a batch of `tokens` (capability, size, scratch).
+    static func canUseTensorGEMM(_ w: GPUMatrix, tokens: Int, precision: GEMMPrecision, context: MetalContext, scratch: MTLBuffer?) -> Bool {
+        precision == .fast && context.supportsTensorGEMM && tokens >= tensorGEMMMinTokens && w.cols % 32 == 0
+            && (w.dtype == .float16 || (w.dtype.isQuantized && (scratch.map { $0.length >= w.rows * w.cols * 2 } ?? false)))
+    }
+
     func canUseTensorGEMM(_ w: GPUMatrix, tokens: Int) -> Bool {
-        precision == .fast && context.supportsTensorGEMM && tokens >= Self.tensorGEMMMinTokens && w.cols % 32 == 0
-            && (w.dtype == .float16 || (w.dtype.isQuantized && (dequantScratch.map { $0.length >= w.rows * w.cols * 2 } ?? false)))
+        Self.canUseTensorGEMM(w, tokens: tokens, precision: precision, context: context, scratch: dequantScratch)
     }
 
     /// Expands a quantised matrix into `target` (half) or returns its own buffer when already half.
@@ -174,51 +179,61 @@ struct KernelEncoder {
         return (target!, 0)
     }
 
-    /// out = silu(X·Wgᵀ) ⊙ (X·Wuᵀ). One fused tensor-op kernel when possible, otherwise two projections + the elementwise kernel.
-    func gateUpSilu(_ wg: GPUMatrix, _ wu: GPUMatrix, x: MTLBuffer, out: MTLBuffer, scratchUp: MTLBuffer, tokens: Int) throws {
-        let quant = wg.dtype.isQuantized
-        if Self.fusedGateUpEnabled, canUseTensorGEMM(wg, tokens: tokens), canUseTensorGEMM(wu, tokens: tokens), wg.dtype == wu.dtype,
-           !quant || (dequantScratch2.map { $0.length >= wu.rows * wu.cols * 2 } ?? false) {
-            let g = try expandToHalf(wg, into: dequantScratch)
-            let u = try expandToHalf(wu, into: dequantScratch2)
-            let p = try context.pipeline("gemm_tensor_gateup_silu")
-            encoder.setComputePipelineState(p)
-            encoder.setBuffer(g.0, offset: g.1, index: 0); encoder.setBuffer(u.0, offset: u.1, index: 1)
-            encoder.setBuffer(x, offset: 0, index: 2); encoder.setBuffer(out, offset: 0, index: 3)
-            set(UInt32(wg.cols), 4); set(UInt32(wg.rows), 5); set(UInt32(tokens), 6)
-            encoder.dispatchThreadgroups(MTLSize(width: (wg.rows + 63) / 64, height: (tokens + 63) / 64, depth: 1),
-                                         threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-            return
-        }
-        try linear(wg, x: x, y: out, tokens: tokens)
-        try linear(wu, x: x, y: scratchUp, tokens: tokens)
-        try siluMul(gate: out, up: scratchUp, out: out, count: tokens * wg.rows)
-    }
-
-    private func encodeTensorGEMM(_ w: GPUMatrix, x: MTLBuffer, xOffset: Int, y: MTLBuffer, yOffset: Int, tokens: Int, accumulate: Bool) throws {
-        var weights = w.buffer, weightOffset = w.offset
-        if w.dtype != .float16 {
-            let name = w.dtype == .q8_0 ? "dequant_q8_0_to_half" : "dequant_q4_0_to_half"
-            let dp = try context.pipeline(name)
-            encoder.setComputePipelineState(dp)
-            encoder.setBuffer(w.buffer, offset: w.offset, index: 0); encoder.setBuffer(dequantScratch!, offset: 0, index: 1)
-            set(UInt32(w.cols), 2)
-            encoder.dispatchThreads(MTLSize(width: w.cols / 32, height: w.rows, depth: 1), threadsPerThreadgroup: MTLSize(width: min(w.cols / 32, 32), height: 8, depth: 1))
-            weights = dequantScratch!; weightOffset = 0
-        }
+    /// Y[tokens, rows] (+)= Xhalf[tokens, cols] · Wᵀ on the tensor-op GEMM. `x` holds half activations; quantised weights are
+    /// expanded into the scratch first. Call only when `canUseTensorGEMM(w, tokens:)` holds.
+    func projectHalf(_ w: GPUMatrix, xHalf x: MTLBuffer, y: MTLBuffer, tokens: Int, accumulate: Bool) throws {
+        let weights = try expandToHalf(w, into: dequantScratch)
         let gp = try context.pipeline(accumulate ? "gemm_tensor_half_w_acc" : "gemm_tensor_half_w")
         encoder.setComputePipelineState(gp)
-        encoder.setBuffer(weights, offset: weightOffset, index: 0)
-        encoder.setBuffer(x, offset: xOffset, index: 1)
-        encoder.setBuffer(y, offset: yOffset, index: 2)
+        encoder.setBuffer(weights.0, offset: weights.1, index: 0)
+        encoder.setBuffer(x, offset: 0, index: 1)
+        encoder.setBuffer(y, offset: 0, index: 2)
         set(UInt32(w.cols), 3); set(UInt32(w.rows), 4); set(UInt32(tokens), 5)
         encoder.dispatchThreadgroups(MTLSize(width: (w.rows + 63) / 64, height: (tokens + 63) / 64, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
     }
 
-    /// residual[tokens, rows] += X[tokens, cols] · Wᵀ in one dispatch (the product is accumulated into `residual` in place).
+    /// RMSNorm writing half output (the activation format of `projectHalf`).
+    func rmsNormToHalf(_ x: MTLBuffer, weight: GPUMatrix, out: MTLBuffer, rows: Int, dim: Int, eps: Float) throws {
+        let p = try context.pipeline("rmsnorm_f32_to_half")
+        encoder.setComputePipelineState(p)
+        encoder.setBuffer(x, offset: 0, index: 0); encoder.setBuffer(weight.buffer, offset: weight.offset, index: 1)
+        encoder.setBuffer(out, offset: 0, index: 2)
+        set(UInt32(dim), 3); set(eps, 4)
+        encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: dim <= 512 ? 128 : 256, height: 1, depth: 1))
+    }
+
+    func convertToHalf(_ x: MTLBuffer, out: MTLBuffer, count: Int) throws {
+        let p = try context.pipeline("convert_f32_to_half")
+        encoder.setComputePipelineState(p)
+        encoder.setBuffer(x, offset: 0, index: 0); encoder.setBuffer(out, offset: 0, index: 1)
+        set(UInt32(count), 2)
+        dispatch1D(p, count: count)
+    }
+
+    /// residual[tokens, rows] += X[tokens, cols] · Wᵀ in one dispatch (float32 kernels; the product is accumulated in place).
     func linearAdd(_ w: GPUMatrix, x: MTLBuffer, residual: MTLBuffer, tokens: Int) throws {
         try linear(w, x: x, y: residual, tokens: tokens, accumulate: true)
+    }
+
+    /// out = silu(X·Wgᵀ) ⊙ (X·Wuᵀ), float32 kernels (two projections and the elementwise gate).
+    func gateUpSilu(_ wg: GPUMatrix, _ wu: GPUMatrix, x: MTLBuffer, out: MTLBuffer, scratchUp: MTLBuffer, tokens: Int) throws {
+        try linear(wg, x: x, y: out, tokens: tokens)
+        try linear(wu, x: x, y: scratchUp, tokens: tokens)
+        try siluMul(gate: out, up: scratchUp, out: out, count: tokens * wg.rows)
+    }
+
+    /// outHalf = half(silu(Xhalf·Wgᵀ) ⊙ (Xhalf·Wuᵀ)) in one tensor-op kernel: both products stay in registers.
+    func gateUpSiluHalf(_ wg: GPUMatrix, _ wu: GPUMatrix, xHalf x: MTLBuffer, outHalf out: MTLBuffer, tokens: Int) throws {
+        let g = try expandToHalf(wg, into: dequantScratch)
+        let u = try expandToHalf(wu, into: dequantScratch2)
+        let p = try context.pipeline("gemm_tensor_gateup_silu")
+        encoder.setComputePipelineState(p)
+        encoder.setBuffer(g.0, offset: g.1, index: 0); encoder.setBuffer(u.0, offset: u.1, index: 1)
+        encoder.setBuffer(x, offset: 0, index: 2); encoder.setBuffer(out, offset: 0, index: 3)
+        set(UInt32(wg.cols), 4); set(UInt32(wg.rows), 5); set(UInt32(tokens), 6)
+        encoder.dispatchThreadgroups(MTLSize(width: (wg.rows + 63) / 64, height: (tokens + 63) / 64, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
     }
 
     /// Y[tokens, rows] = X[tokens, cols] · Wᵀ
@@ -229,10 +244,6 @@ struct KernelEncoder {
         case .q8_0: fmt = "q8_0"
         case .q4_0: fmt = "q4_0"
         case .float32: throw MetalError.unsupported("f32 weight matrices on Metal")
-        }
-        if canUseTensorGEMM(w, tokens: tokens) {
-            try encodeTensorGEMM(w, x: x, xOffset: xOffset, y: y, yOffset: yOffset, tokens: tokens, accumulate: accumulate)
-            return
         }
         if tokens >= Self.gemmMinTokens && w.cols % 32 == 0 {
             let p = try context.pipeline("mm_\(fmt)")
@@ -268,7 +279,7 @@ struct KernelEncoder {
 
     func attention(q: MTLBuffer, kCache: MTLBuffer, vCache: MTLBuffer, out: MTLBuffer,
                    heads: Int, kvHeads: Int, headDim: Int, startPosition: Int, tokens: Int, kv: KVPrecision,
-                   decodeScratch: MTLBuffer? = nil) throws {
+                   decodeScratch: MTLBuffer? = nil, outputHalf: Bool = false) throws {
         if kv == .float16 && tokens == 1 && startPosition + 1 >= Self.decodeSplitMinContext && (headDim == 64 || headDim == 128) && heads % kvHeads == 0 && heads / kvHeads <= 8,
            let scratch = decodeScratch {
             let length = startPosition + 1
@@ -289,7 +300,7 @@ struct KernelEncoder {
             return
         }
         if kv == .float16 && tokens >= Self.prefillAttentionMinTokens && (headDim == 64 || headDim == 128) {
-            let p = try context.pipeline("attn_prefill_hd\(headDim)_kv16")
+            let p = try context.pipeline("attn_prefill_hd\(headDim)_kv16" + (outputHalf ? "_oh" : ""))
             encoder.setComputePipelineState(p)
             encoder.setBuffer(q, offset: 0, index: 0); encoder.setBuffer(kCache, offset: 0, index: 1)
             encoder.setBuffer(vCache, offset: 0, index: 2); encoder.setBuffer(out, offset: 0, index: 3)
@@ -320,7 +331,6 @@ extension KernelEncoder {
 
     /// Fused decode kernels handle a single token, K ≤ 4096, and need every weight of one launch in the same format.
     static let decodeMaxK = 4096
-    nonisolated(unsafe) static var fusedGateUpEnabled = Tuning.int("ALPACA_DISABLE_FUSED_GATEUP", 0) == 0
     nonisolated(unsafe) static var fusedDecodeEnabled = Tuning.int("ALPACA_DISABLE_FUSED_DECODE", 0) == 0
 
     static func canFuseDecode(_ mats: [GPUMatrix], tokens: Int) -> Bool {
