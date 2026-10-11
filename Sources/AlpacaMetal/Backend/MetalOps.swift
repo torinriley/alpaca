@@ -40,6 +40,22 @@ public final class MetalOps: @unchecked Sendable {
         return t
     }
 
+    /// Half-precision copy of a float tensor, as the tensor-op GEMM expects its activations.
+    func halfBuffer(_ t: Tensor) throws -> MTLBuffer {
+        let h = try t.converted(to: .float16)
+        return try context.makeBuffer(copying: h.basePointer, length: h.elementCount * 2)
+    }
+
+    func readHalf(_ b: MTLBuffer, shape: [Int]) throws -> Tensor {
+        let h = try Tensor(zeros: shape, dtype: .float16)
+        memcpy(h.storage.pointer, b.contents(), h.elementCount * 2)
+        return try h.converted(to: .float32)
+    }
+
+    func eligibleForTensorGEMM(_ w: GPUMatrix, tokens: Int, precision: GEMMPrecision, scratch: MTLBuffer?) -> Bool {
+        KernelEncoder.canUseTensorGEMM(w, tokens: tokens, precision: precision, context: context, scratch: scratch)
+    }
+
     func requireF32(_ ts: Tensor...) throws {
         for t in ts where t.dtype != .float32 || !t.isContiguous { throw MetalError.invalidArgument("operands must be contiguous f32") }
     }
@@ -99,7 +115,12 @@ public final class MetalOps: @unchecked Sendable {
         let bx = try buffer(x), bw = try buffer(w)
         let gw = GPUMatrix(buffer: bw, offset: 0, dtype: w.dtype, rows: n, cols: k)
         let scratch = (precision == .fast && w.dtype.isQuantized) ? try context.makeBuffer(length: n * k * 2) : nil
-        try run(precision: precision, scratch: scratch) { try $0.linear(gw, x: bx, y: out, tokens: m) }
+        if eligibleForTensorGEMM(gw, tokens: m, precision: precision, scratch: scratch) {
+            let xh = try halfBuffer(x)
+            try run(precision: precision, scratch: scratch) { try $0.projectHalf(gw, xHalf: xh, y: out, tokens: m, accumulate: false) }
+        } else {
+            try run(precision: precision, scratch: scratch) { try $0.linear(gw, x: bx, y: out, tokens: m) }
+        }
         return try read(out, shape: [m, n])
     }
 
@@ -111,7 +132,12 @@ public final class MetalOps: @unchecked Sendable {
         let bx = try buffer(x), bw = try buffer(w), res = try buffer(residual)
         let scratch = w.dtype.isQuantized ? try context.makeBuffer(length: n * k * 2) : nil
         let gw = GPUMatrix(buffer: bw, offset: 0, dtype: w.dtype, rows: n, cols: k)
-        try run(precision: precision, scratch: scratch) { try $0.linearAdd(gw, x: bx, residual: res, tokens: m) }
+        if eligibleForTensorGEMM(gw, tokens: m, precision: precision, scratch: scratch) {
+            let xh = try halfBuffer(x)
+            try run(precision: precision, scratch: scratch) { try $0.projectHalf(gw, xHalf: xh, y: res, tokens: m, accumulate: true) }
+        } else {
+            try run(precision: precision, scratch: scratch) { try $0.linearAdd(gw, x: bx, residual: res, tokens: m) }
+        }
         return try read(res, shape: [m, n])
     }
 
@@ -127,6 +153,11 @@ public final class MetalOps: @unchecked Sendable {
         let s1 = wg.dtype.isQuantized ? try context.makeBuffer(length: n * k * 2) : nil
         let s2 = wg.dtype.isQuantized ? try context.makeBuffer(length: n * k * 2) : nil
         let gg = GPUMatrix(buffer: bg, offset: 0, dtype: wg.dtype, rows: n, cols: k), gu = GPUMatrix(buffer: bu, offset: 0, dtype: wu.dtype, rows: n, cols: k)
+        if wg.dtype == wu.dtype, eligibleForTensorGEMM(gg, tokens: m, precision: precision, scratch: s1) {
+            let xh = try halfBuffer(x), oh = try context.makeBuffer(length: m * n * 2)
+            try run(precision: precision, scratch: s1, scratch2: s2) { try $0.gateUpSiluHalf(gg, gu, xHalf: xh, outHalf: oh, tokens: m) }
+            return try readHalf(oh, shape: [m, n])
+        }
         try run(precision: precision, scratch: s1, scratch2: s2) { try $0.gateUpSilu(gg, gu, x: bx, out: out, scratchUp: up, tokens: m) }
         return try read(out, shape: [m, n])
     }
@@ -143,7 +174,7 @@ public final class MetalOps: @unchecked Sendable {
     /// Full causal GQA attention as one kernel (online softmax). Keys/values are f32 on the way in and are
     /// rounded to f16 for the cache when `kv == .float16`, exactly as in the model path.
     /// q: [tokens, heads, headDim]; keys/values: [capacity, kvHeads, headDim]. Returns [tokens, heads, headDim].
-    public func attention(q: Tensor, keys: Tensor, values: Tensor, startPosition: Int, kv: KVPrecision = .float16) throws -> Tensor {
+    public func attention(q: Tensor, keys: Tensor, values: Tensor, startPosition: Int, kv: KVPrecision = .float16, precision: GEMMPrecision = .exact) throws -> Tensor {
         try requireF32(q, keys, values)
         guard q.rank == 3, keys.shape == values.shape, keys.rank == 3, keys.shape[2] == q.shape[2], q.shape[1] % keys.shape[1] == 0,
               q.shape[2] % 32 == 0, q.shape[2] <= 256, startPosition + q.shape[0] <= keys.shape[0]
@@ -158,6 +189,14 @@ public final class MetalOps: @unchecked Sendable {
         }
         let kb = try toCache(keys), vb = try toCache(values), qb = try buffer(q)
         let out = try context.makeBuffer(length: q.elementCount * 4)
+        if KernelEncoder.canUseTensorAttention(context: context, precision: precision, kv: kv, headDim: q.shape[2], tokens: q.shape[0]) {
+            let qh = try halfBuffer(q)
+            try run(precision: precision) {
+                try $0.attentionTensor(qHalf: qh, kCache: kb, vCache: vb, out: out, outputHalf: false, heads: q.shape[1], kvHeads: keys.shape[1],
+                                       headDim: q.shape[2], startPosition: startPosition, tokens: q.shape[0])
+            }
+            return try read(out, shape: q.shape)
+        }
         let scratch = try context.makeBuffer(length: KernelEncoder.decodeScratchBytes(heads: q.shape[1], kvHeads: keys.shape[1], headDim: q.shape[2], capacity: keys.shape[0]))
         try run {
             try $0.attention(q: qb, kCache: kb, vCache: vb, out: out, heads: q.shape[1], kvHeads: keys.shape[1],

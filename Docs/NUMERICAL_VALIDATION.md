@@ -82,8 +82,9 @@ Defaults are now `GEMMPrecision.fast` (prefill projections on the matrix hardwar
 |---|---|---|---|
 | Tensor-op GEMM (`.fast`), batches ≥ 16 | activations → half, weights → half (quantised weights: `d·q` rounded to half), float32 accumulate | per-element analytic bound `2⁻¹⁰·Σ|xₖwₖ|` (+1e-5), K ∈ {64…1536}, N not a multiple of 64, T ∈ {32…300}, f16/q8_0/q4_0 (`FastGEMMTests`) | worst error = **31%** of the bound |
 | Fused residual (`C += A·B`) | same | `linearAdd` vs CPU for T ∈ {1…100}: exact 2e-4, fast 2e-2 absolute (values ≤ ~20) | exact ≤ 1e-5; fast ≤ 4.4e-3 |
-| Fused gate+up+SiLU | same, through SiLU and a product | peak-relative 3e-3 | ≤ 8.3e-4 |
-| Tiled attention (T ≥ 8) | Q, softmax weights P, K, V → half | vs float64-accurate CPU reference on the same half K/V: ≤ 1.5e-3 (3·2⁻¹¹·max|V|), 10 shapes incl. partial tiles, GQA 1–4, hd 64/128, chunk offsets | **≤ 2.0e-4** |
+| Fused gate+up+SiLU | same, through SiLU and a product; output stored as half | peak-relative 3e-3 | ≤ 8.3e-4 |
+| Half activations end to end (norm, attention, SwiGLU write half) | activations are rounded to half at the same point as before, one kernel earlier | unchanged bounds; `FastGEMMTests` worst error 23% of the analytic bound | identical arithmetic |
+| Tensor-op attention (T ≥ 16, Apple10) and tiled simdgroup attention (T ≥ 8) | Q, softmax weights P, K, V → half (the tensor-op kernel accumulates in float32 with relaxed precision) | vs float64-accurate CPU reference on the same half K/V: ≤ 1.5e-3 (3·2⁻¹¹·max|V|), 10 shapes incl. partial tiles, GQA 1–4, hd 64/128, chunk offsets | **≤ 2.0e-4** (both kernels, 10 shapes) |
 | Split-K decode attention (T = 1) | K/V half (same as before); float32 elsewhere | 13 context lengths around split boundaries, GQA 1–8, hd 64/128: 2e-6 | **≤ 1.2e-7** |
 | Fused decode mat-vecs, RoPE+KV store, GPU arg-max | float32 reorderings only | covered by the 5e-4 GPU-vs-CPU test (exact config) and by 40-step token-for-token equality of the chained GPU greedy path with the synchronous path | 2.7e-5; tokens identical |
 
@@ -91,11 +92,11 @@ Defaults are now `GEMMPrecision.fast` (prefill projections on the matrix hardwar
 
 | file | 5 tokens | 16 tokens | 90 tokens |
 |---|---|---|---|
-| F16  | 6.2e-3 abs / 3.0e-4 | 1.8e-2 / 5.3e-4 | 2.1e-2 / 1.3e-3 |
-| Q8_0 | 1.4e-2 / 6.7e-4 | 3.5e-2 / 1.0e-3 | 1.3e-2 / 8.5e-4 |
-| Q4_0 | 9.4e-3 / 5.2e-4 | 1.6e-2 / 4.8e-4 | 2.2e-2 / 1.5e-3 |
+| F16  | 6.2e-3 abs / 3.0e-4 | 2.2e-2 / 6.3e-4 | 1.1e-2 / 6.9e-4 |
+| Q8_0 | 1.4e-2 / 6.7e-4 | 3.1e-2 / 9.0e-4 | 1.1e-2 / 7.4e-4 |
+| Q4_0 | 9.4e-3 / 5.2e-4 | 3.4e-2 / 1.0e-3 | 8.4e-3 / 5.6e-4 |
 
-Greedy continuations: **72/72 tokens identical** to the reference on the GPU for all three files (synchronous decoding in `MetalRealModelTests`). The chained GPU-arg-max path is checked token-for-token against that synchronous path over 40 steps (`testGPUGreedyChainMatchesSynchronousDecoding`, including early stop and capacity limits) and against the reference through the public API (24 tokens, `PublicAPITests`). Isolating the contributions on the 90-token prompt: `.fast` vs `.exact` GEMM 1.1–1.4e-3 (peak-relative), f16 vs f32 KV cache 4.7e-4 (7.2e-3 abs), exact config vs CPU **2.7e-5**. The earlier absolute bound (5e-2) was replaced by a peak-relative one because every reduced-precision element scales with logit magnitude.
+Greedy continuations: **72/72 tokens identical** to the reference on the GPU for all three files (synchronous decoding in `MetalRealModelTests`). The chained GPU-arg-max path is checked token-for-token against that synchronous path over 40 steps (`testGPUGreedyChainMatchesSynchronousDecoding`, including early stop and capacity limits) and against the reference through the public API (24 tokens, `PublicAPITests`). Isolating the contributions: `.fast` vs `.exact` prefill 6.3e-4–1.1e-3 (peak-relative, 16 and 90 tokens), f16 vs f32 KV cache 4.7e-4 (7.2e-3 abs), exact config vs CPU **2.7e-5**. The earlier absolute bound (5e-2) was replaced by a peak-relative one because every reduced-precision element scales with logit magnitude.
 
 Not weakened: all Phase 1–2 bounds (CPU 5e-4 / 7e-4 / 1.6e-2, kernels vs CPU, tiny-model 2e-5) are unchanged and still pass. The GPU-vs-CPU test now selects the exact configuration explicitly instead of inheriting a faster default.
 
