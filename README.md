@@ -4,9 +4,6 @@
 [![Release](https://img.shields.io/github/v/tag/torinriley/alpaca?label=release)](https://github.com/torinriley/alpaca/tags)
 [![License: MIT](https://img.shields.io/github/license/torinriley/alpaca)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/torinriley/alpaca?style=flat)](https://github.com/torinriley/alpaca/stargazers)
-![Platforms](https://img.shields.io/badge/platforms-macOS%2014%2B%20%7C%20iOS%2017%2B-blue)
-![Swift](https://img.shields.io/badge/Swift-6-orange)
-![Status](https://img.shields.io/badge/status-pre--release-yellow)
 
 **Native language model inference for Apple Silicon.**
 
