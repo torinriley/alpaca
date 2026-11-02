@@ -1,0 +1,14 @@
+tokens: 301948 (tokenised in 0.2 s)
+  0/4000  1 s
+  500/4000  114 s
+  1000/4000  224 s
+  1500/4000  335 s
+  2000/4000  448 s
+  2500/4000  567 s
+  3000/4000  729 s
+  3500/4000  877 s
+ref: ppl 15.415 meanKL 0.00e+00
+gemm: ppl 15.414 meanKL 8.13e-07
+kv16: ppl 15.415 meanKL 7.11e-07
+default: ppl 15.414 meanKL 1.41e-06
+.build/release/AlpacaEval Models/gguf/SmolLM2-360M-Instruct-f16.gguf   4000    31.58s user 1.41s system 3% cpu 17:02.57 total

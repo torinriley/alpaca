@@ -1,0 +1,11 @@
+model SmolLM2-1.7B-Instruct-Q8_0.gguf | backend metal | load cold 0.062 s, warm 0.025 s
+
+prefill / decode by prompt length (median of 7; decode 64 tokens)
+prompt  prefill tok/s (min–max)        decode tok/s (min–max)         ttft ms   gpu ms/run
+   16       180.8 (154.9–191.6, sd 12.1)        46.9 (45.9–48.6, sd 1.0)      88.6    1424.2
+  128      1258.2 (1220.5–1312.3, sd 27.9)        47.3 (46.4–48.6, sd 0.7)     101.8    1432.3
+  512      1676.2 (1533.8–1752.8, sd 71.6)        45.1 (44.3–46.9, sd 0.9)     305.5    1687.1
+ 2048      1611.1 (1584.5–1634.7, sd 16.5)        39.9 (36.8–40.3, sd 1.2)    1271.3    2845.5
+
+peak footprint 642 MiB (resident 43 MiB) | process CPU use 0.01 cores | thermal nominal → nominal
+wrote Experiments/results/bench-main/alpaca-1.7B-Q8_0.json

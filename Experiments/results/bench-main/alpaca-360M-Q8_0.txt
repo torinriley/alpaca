@@ -1,0 +1,11 @@
+model SmolLM2-360M-Instruct-Q8_0.gguf | backend metal | load cold 0.059 s, warm 0.025 s
+
+prefill / decode by prompt length (median of 7; decode 64 tokens)
+prompt  prefill tok/s (min–max)        decode tok/s (min–max)         ttft ms   gpu ms/run
+   16       958.1 (879.1–1258.3, sd 136.1)       182.8 (168.9–190.3, sd 8.0)      16.8     357.2
+  128      6399.4 (5427.7–8300.4, sd 1023.1)       198.9 (167.3–201.2, sd 12.2)      20.1     332.8
+  512     11389.9 (9882.3–12329.0, sd 773.4)       197.8 (176.8–201.2, sd 8.6)      45.1     363.1
+ 2048      9938.2 (9497.0–9972.4, sd 171.8)       172.2 (167.4–175.7, sd 2.9)     206.1     570.3
+
+peak footprint 185 MiB (resident 42 MiB) | process CPU use 0.03 cores | thermal nominal → nominal
+wrote Experiments/results/bench-main/alpaca-360M-Q8_0.json

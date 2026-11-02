@@ -1,0 +1,14 @@
+Sun Nov  1 15:34:46 EST 2026
+15:34  up 16 days,  3:30, 2 users, load averages: 2.41 2.99 2.88
+swift-driver version: 1.168.6 Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+Apple M5
+17179869184
+load_backend: loaded BLAS backend from /opt/homebrew/Cellar/ggml/0.26.0/libexec/libggml-blas.so
+ggml_metal_device_init: testing tensor API for f16 support
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'dummy_kernel', name = 'dummy_kernel'
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

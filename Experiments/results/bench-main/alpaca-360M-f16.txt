@@ -1,0 +1,11 @@
+model SmolLM2-360M-Instruct-f16.gguf | backend metal | load cold 0.052 s, warm 0.030 s
+
+prefill / decode by prompt length (median of 7; decode 64 tokens)
+prompt  prefill tok/s (min–max)        decode tok/s (min–max)         ttft ms   gpu ms/run
+   16      1151.6 (1031.5–1372.9, sd 132.6)       111.9 (108.8–114.7, sd 2.0)      14.0     573.6
+  128      9521.7 (8460.1–9717.6, sd 598.9)       109.8 (103.0–113.5, sd 4.3)      13.5     587.3
+  512     12526.9 (12008.9–14181.3, sd 846.3)       108.1 (94.4–110.7, sd 6.5)      41.0     623.6
+ 2048     11333.0 (10582.7–11878.5, sd 485.8)        94.9 (82.4–100.3, sd 7.5)     180.8     840.3
+
+peak footprint 175 MiB (resident 39 MiB) | process CPU use 0.02 cores | thermal nominal → nominal
+wrote Experiments/results/bench-main/alpaca-360M-f16.json

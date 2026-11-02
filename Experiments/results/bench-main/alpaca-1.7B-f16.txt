@@ -1,0 +1,11 @@
+model SmolLM2-1.7B-Instruct-f16.gguf | backend metal | load cold 0.050 s, warm 0.025 s
+
+prefill / decode by prompt length (median of 7; decode 64 tokens)
+prompt  prefill tok/s (min–max)        decode tok/s (min–max)         ttft ms   gpu ms/run
+   16       306.8 (256.3–320.8, sd 21.6)        24.0 (22.3–24.7, sd 0.9)      52.2    2678.6
+  128      1956.4 (1854.1–2086.9, sd 77.0)        23.7 (23.0–23.8, sd 0.3)      65.5    2718.6
+  512      1723.9 (1660.5–1786.2, sd 43.9)        22.8 (22.2–23.5, sd 0.4)     297.1    3064.7
+ 2048      1622.8 (1579.7–1681.9, sd 32.6)        20.9 (19.6–21.5, sd 0.7)    1262.1    4314.5
+
+peak footprint 577 MiB (resident 43 MiB) | process CPU use 0.00 cores | thermal nominal → nominal
+wrote Experiments/results/bench-main/alpaca-1.7B-f16.json

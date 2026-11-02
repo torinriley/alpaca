@@ -85,7 +85,11 @@ public final class LanguageModel: @unchecked Sendable {
             switch backend {
             case .metal:
                 gpu = try MetalLlamaModel(context: MetalContext(), config: config, weights: loaded.weights,
-                                          mappedRegion: loaded.file.mappedMemory, keepAlive: loaded.file.mappingOwner)
+                                          mappedRegion: loaded.file.mappedMemory, keepAlive: loaded.file.mappingOwner,
+                                          prefillWeightCache: options.prefillWeightCache)
+                if let g = gpu, estimate.totalBytes + g.prefillCacheBytes > budget {
+                    throw AlpacaError.insufficientMemory(requiredBytes: estimate.totalBytes + g.prefillCacheBytes, budgetBytes: budget, breakdown: estimate.description + " + prefill weight cache \(g.prefillCacheBytes >> 20) MiB")
+                }
             default:
                 cpu = try LlamaCPUModel(config: config, weights: loaded.weights)
             }

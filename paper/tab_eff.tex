@@ -1,0 +1,13 @@
+\begin{tabular}{llrrrr}\toprule
+ & & \multicolumn{2}{c}{prefill TFLOP/s} & \multicolumn{2}{c}{decode GB/s}\\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+model & fmt & alpaca & llama.cpp & alpaca & llama.cpp\\\midrule
+135M & F16 & 5.5 & 3.5 & 74 & 66\\
+135M & Q8\_0 & 5.0 & 3.4 & 68 & 51\\
+135M & Q4\_0 & 5.1 & 3.5 & 50 & 37\\
+360M & F16 & 7.1 & 4.2 & 81 & 73\\
+360M & Q8\_0 & 6.3 & 4.6 & 71 & 74\\
+360M & Q4\_0 & 6.3 & 4.6 & 67 & 59\\
+1.7B & F16 & 5.2 & 6.4 & 82 & 84\\
+1.7B & Q8\_0 & 5.2 & 6.6 & 85 & 87\\
+\bottomrule\end{tabular}

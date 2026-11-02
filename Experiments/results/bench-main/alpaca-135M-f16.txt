@@ -1,0 +1,11 @@
+model SmolLM2-135M-Instruct-f16.gguf | backend metal | load cold 0.058 s, warm 0.025 s
+
+prefill / decode by prompt length (median of 7; decode 64 tokens)
+prompt  prefill tok/s (min–max)        decode tok/s (min–max)         ttft ms   gpu ms/run
+   16      2437.2 (1818.6–3415.1, sd 600.2)       273.2 (254.9–278.9, sd 8.0)       6.6     235.6
+  128     18718.7 (15966.2–25034.2, sd 3905.1)       262.7 (255.6–266.9, sd 3.8)       6.9     245.8
+  512     34686.1 (30708.4–36206.9, sd 2186.8)       251.9 (246.4–254.1, sd 2.5)      14.9     264.2
+ 2048     26053.7 (25324.9–26521.6, sd 507.6)       227.5 (216.4–238.0, sd 8.4)      78.7     354.2
+
+peak footprint 127 MiB (resident 40 MiB) | process CPU use 0.04 cores | thermal nominal → nominal
+wrote Experiments/results/bench-main/alpaca-135M-f16.json

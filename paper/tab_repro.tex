@@ -1,0 +1,13 @@
+\begin{tabular}{llrrrr}\toprule
+ & & \multicolumn{2}{c}{prefill ratio, $n{=}512$} & \multicolumn{2}{c}{decode ratio, ctx 512}\\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+model & fmt & pass 1 & pass 2 & pass 1 & pass 2\\\midrule
+135M & F16 & 1.64 & 1.49 & 1.04 & 1.06\\
+135M & Q8\_0 & 1.43 & 1.33 & 1.24 & 1.25\\
+135M & Q4\_0 & 1.32 & 1.33 & 1.22 & 1.25\\
+360M & F16 & 1.60 & 1.49 & 1.11 & 0.97\\
+360M & Q8\_0 & 1.25 & 1.25 & 1.09 & 1.05\\
+360M & Q4\_0 & 1.27 & 1.26 & 1.06 & 1.08\\
+1.7B & F16 & 0.79 & 0.66 & 0.96 & 0.94\\
+1.7B & Q8\_0 & 0.75 & 0.63 & 0.95 & 0.99\\
+\bottomrule\end{tabular}

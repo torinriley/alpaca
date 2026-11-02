@@ -1,0 +1,1 @@
+error: could not load SmolLM2-1.7B-Instruct-Q4_0.gguf: tensor 'token_embd.weight' uses unsupported GGML type id 14

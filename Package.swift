@@ -29,6 +29,7 @@ let package = Package(
             dependencies: ["AlpacaCore", "AlpacaMetal", "AlpacaModels", "AlpacaTokenizers"]
         ),
         .executableTarget(name: "AlpacaCLI", dependencies: ["Alpaca"]),
+        .executableTarget(name: "AlpacaEval", dependencies: ["AlpacaCore", "AlpacaMetal", "AlpacaModels", "AlpacaTokenizers"], path: "Experiments/AlpacaEval"),
 
         .testTarget(
             name: "AlpacaCoreTests", dependencies: ["AlpacaCore"],
