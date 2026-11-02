@@ -1,0 +1,118 @@
+{
+  "backend" : "metal",
+  "currentPhysicalFootprintMiB" : 573,
+  "decodeTokens" : 64,
+  "hardware" : {
+    "chip" : "Apple M5",
+    "cores" : 10,
+    "memoryGiB" : 16,
+    "model" : "Mac17,2"
+  },
+  "kvPrecision" : "f16",
+  "loadSecondsCold" : 0.053503990173339844,
+  "loadSecondsWarm" : 0.024289965629577637,
+  "model" : "SmolLM2-1.7B-Instruct-f16.gguf",
+  "modelBytes" : 3424735936,
+  "os" : "Version 27.0.1 (Build 26A434)",
+  "peakPhysicalFootprintMiB" : 573,
+  "peakResidentMiB" : 43,
+  "processCPUUtilizationDuringBench" : 0.0062585283601897133,
+  "resolvedBackend" : "metal",
+  "results" : [
+    {
+      "decodeTokensPerSecond" : {
+        "max" : 35.84535288269366,
+        "median" : 35.798097658583771,
+        "min" : 35.147560451505313,
+        "stdev" : 0.30254619993422527
+      },
+      "gpuMs" : {
+        "median" : 1795.9780835080892
+      },
+      "prefillTokensPerSecond" : {
+        "max" : 435.71808672955933,
+        "median" : 434.523295077456,
+        "min" : 434.0750054979884,
+        "stdev" : 0.6275430422414191
+      },
+      "promptTokens" : 16,
+      "timeToFirstTokenMs" : {
+        "max" : 36.947965621948242,
+        "median" : 36.920905113220215,
+        "min" : 36.818981170654297
+      }
+    },
+    {
+      "decodeTokensPerSecond" : {
+        "max" : 35.760304692057943,
+        "median" : 35.648889113739614,
+        "min" : 34.739989847826521,
+        "stdev" : 0.4251356260512858
+      },
+      "gpuMs" : {
+        "median" : 1811.3080827752128
+      },
+      "prefillTokensPerSecond" : {
+        "max" : 2857.7180239211784,
+        "median" : 2848.9452494222469,
+        "min" : 2841.9777510157087,
+        "stdev" : 6.3537112102810678
+      },
+      "promptTokens" : 128,
+      "timeToFirstTokenMs" : {
+        "max" : 45.138001441955566,
+        "median" : 45.027017593383789,
+        "min" : 44.890999794006348
+      }
+    },
+    {
+      "decodeTokensPerSecond" : {
+        "max" : 34.959485924217866,
+        "median" : 34.947055521059198,
+        "min" : 34.903799595683566,
+        "stdev" : 0.022032326496138767
+      },
+      "gpuMs" : {
+        "median" : 1928.1505417311564
+      },
+      "prefillTokensPerSecond" : {
+        "max" : 4087.2725417889924,
+        "median" : 4047.9416564171438,
+        "min" : 4038.5249972026304,
+        "stdev" : 18.898029929993392
+      },
+      "promptTokens" : 512,
+      "timeToFirstTokenMs" : {
+        "max" : 126.87802314758301,
+        "median" : 126.58107280731201,
+        "min" : 125.35500526428223
+      }
+    },
+    {
+      "decodeTokensPerSecond" : {
+        "max" : 32.243519018700162,
+        "median" : 32.16471612728963,
+        "min" : 32.093358911716322,
+        "stdev" : 0.061059790074650719
+      },
+      "gpuMs" : {
+        "median" : 2500.0452918466181
+      },
+      "prefillTokensPerSecond" : {
+        "max" : 3778.8558830613365,
+        "median" : 3764.6710290142646,
+        "min" : 3639.6339203753046,
+        "stdev" : 58.811644498535387
+      },
+      "promptTokens" : 2048,
+      "timeToFirstTokenMs" : {
+        "max" : 562.79397010803223,
+        "median" : 544.09801959991455,
+        "min" : 542.05191135406494
+      }
+    }
+  ],
+  "runs" : 5,
+  "thermalAfter" : "fair",
+  "thermalBefore" : "fair"
+}

@@ -1,0 +1,9 @@
+tokens: 301948 (tokenised in 0.2 s)
+  0/2000  0 s
+  500/2000  52 s
+  1000/2000  104 s
+  1500/2000  156 s
+ref: ppl 23.315 meanKL 0.00e+00
+gemm: ppl 23.314 meanKL 8.59e-07
+kv16: ppl 23.315 meanKL 5.44e-07
+default: ppl 23.314 meanKL 1.38e-06

@@ -1,0 +1,11 @@
+profile: 2048 new tokens after 0 cached | unprofiled GPU 65.37 ms, encode (CPU) 0.50 ms, wall 66.13 ms
+per-stage GPU time (separate command buffers; sum 66.15 ms):
+  attention   22.057 ms   33.3%
+  ffn gate+up+silu   19.370 ms   29.3%
+  ffn down (+residual)    9.984 ms   15.1%
+  qkv projections    6.988 ms   10.6%
+  attn out projection (+residual)    4.067 ms    6.1%
+  rmsnorm    2.014 ms    3.0%
+  rope + kv store    1.420 ms    2.1%
+  final norm + logits    0.243 ms    0.4%
+  embed    0.029 ms    0.0%

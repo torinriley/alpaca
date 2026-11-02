@@ -1,0 +1,49 @@
+{
+  "backend" : "metal",
+  "currentPhysicalFootprintMiB" : 115,
+  "decodeTokens" : 512,
+  "hardware" : {
+    "chip" : "Apple M5",
+    "cores" : 10,
+    "memoryGiB" : 16,
+    "model" : "Mac17,2"
+  },
+  "kvPrecision" : "f16",
+  "loadSecondsCold" : 0.045894026756286621,
+  "loadSecondsWarm" : 0.024225950241088867,
+  "model" : "SmolLM2-360M-Instruct-Q8_0.gguf",
+  "modelBytes" : 386405280,
+  "os" : "Version 27.0.1 (Build 26A434)",
+  "peakPhysicalFootprintMiB" : 115,
+  "peakResidentMiB" : 40,
+  "processCPUUtilizationDuringBench" : 0.046087104148170743,
+  "resolvedBackend" : "metal",
+  "results" : [
+    {
+      "decodeTokensPerSecond" : {
+        "max" : 264.58123130443715,
+        "median" : 264.58123130443715,
+        "min" : 264.58123130443715,
+        "stdev" : 0
+      },
+      "gpuMs" : {
+        "median" : 1940.5426675220951
+      },
+      "prefillTokensPerSecond" : {
+        "max" : 1592.5027942240838,
+        "median" : 1592.5027942240838,
+        "min" : 1592.5027942240838,
+        "stdev" : 0
+      },
+      "promptTokens" : 16,
+      "timeToFirstTokenMs" : {
+        "max" : 10.137081146240234,
+        "median" : 10.137081146240234,
+        "min" : 10.137081146240234
+      }
+    }
+  ],
+  "runs" : 1,
+  "thermalAfter" : "nominal",
+  "thermalBefore" : "nominal"
+}

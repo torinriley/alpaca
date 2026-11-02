@@ -1,0 +1,9 @@
+99b866e77adee858930244229afa833dbe3372a7bf122905ea506119c6911ae8  Models/gguf/SmolLM2-1.7B-Instruct-Q4_0.gguf
+0c6e8955788b1253f418c354a4bdc4cf507b8cfe49c48bb10c7c58ae713cfa2a  Models/gguf/SmolLM2-1.7B-Instruct-Q8_0.gguf
+cf3f0569a9d0b56d5d3b5b7944768c71bd2fef789f8b36b1b85a05d390850852  Models/gguf/SmolLM2-1.7B-Instruct-f16.gguf
+bcc3af2849ad6095af57e9b5cd43775256efdc66e306acb529172f92d0c04b03  Models/gguf/SmolLM2-135M-Instruct-Q4_0.gguf
+5a1395716f7913741cc51d98581b9b1228d80987a9f7d3664106742eb06bba83  Models/gguf/SmolLM2-135M-Instruct-Q8_0.gguf
+f535f83ec568d040f88ddc04a199fa6da90923bbb41d4dcaed02caa924d6ef57  Models/gguf/SmolLM2-135M-Instruct-f16.gguf
+c3608933eb6e5763b87f769bda40c204dc158333668c7af214644fe39da58627  Models/gguf/SmolLM2-360M-Instruct-Q4_0.gguf
+c004ac34cce45e03e4452bca472535bc371fcb0d07ae560bba2c57ce4a284b7b  Models/gguf/SmolLM2-360M-Instruct-Q8_0.gguf
+7d23be4097d67c5c43c3df62ebc19609a25f483c7d0b77d3989e1d94e36ccab6  Models/gguf/SmolLM2-360M-Instruct-f16.gguf

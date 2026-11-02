@@ -1,0 +1,14 @@
+Sun Nov  1 17:10:39 EST 2026
+17:10  up 16 days,  5:06, 1 user, load averages: 2.48 2.52 2.66
+Apple M5
+a53f1d2
+ M Package.swift
+ M Sources/Alpaca/Configuration.swift
+ M Sources/Alpaca/LanguageModel.swift
+ M Sources/AlpacaCLI/main.swift
+ M Sources/AlpacaMetal/Backend/KernelEncoder.swift
+ M Sources/AlpacaMetal/Backend/MetalContext.swift
+ M Sources/AlpacaMetal/Backend/MetalLlamaModel.swift
+ M Sources/AlpacaMetal/Kernels/tensor_gemm.metal
+?? Experiments/
+?? paper/
