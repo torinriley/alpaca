@@ -18,6 +18,7 @@ A Swift-first inference runtime with custom Metal compute kernels, GGUF model lo
 - **Independent implementation.** Tensor engine, CPU reference ops, GGUF parser, BPE tokenizer, Llama forward pass, sampler and all Metal kernels are written in this repository. Python/PyTorch is used only offline to generate reference fixtures.
 - **Correctness first.** Every operation has a deterministic CPU reference and a test against independently generated vectors (numpy/PyTorch float64, the `gguf` package, Hugging Face `transformers`/`tokenizers`) with an explicit, justified tolerance. The CPU backend matches Hugging Face float32 to 5e-5 (F16) and 7e-5 (Q8_0) on logits; 191/191 tokenizer test strings produce identical token IDs; 72/72 greedy tokens match on every format.
 - **Competitive performance, measured.** On the validation model, same machine and files, alpaca prefills 1.3–1.7× faster than llama.cpp from 128 to 4096 tokens (Q8_0: 24.1k vs 18.3k tok/s at 128, 24.1k vs 15.4k at 4096) and decodes 1.02–1.38× faster at 16–4096 tokens of context. It is slower only for very short prompts (16 tokens: 0.72–0.90×). See [Docs/PERFORMANCE.md](Docs/PERFORMANCE.md) for the method, the bottleneck analysis and the optimisations that did *not* work.
+- **Technical report.** [paper/alpaca-swift.pdf](paper/alpaca-swift.pdf) evaluates alpaca against llama.cpp at 135M, 360M and 1.7B parameters in F16, Q8_0 and Q4_0, diagnoses why prefill did not scale to 1.7B, and measures the GEMM changes that fix it ([source](paper/alpaca-swift.tex), [experiments](Experiments)).
 - **Robust against hostile input.** The GGUF parser treats model files as untrusted: every length is bounded by the bytes actually present, all arithmetic is overflow-checked, and it survived 20,000 mutation-fuzzed files without a crash.
 - **Idiomatic API.** `async` loading, `AsyncSequence` token streaming, cancellation, seeded sampling, per-generation isolated sessions, and a memory-budget check that refuses to load a model that will not fit.
 
@@ -129,6 +130,8 @@ Sources/          AlpacaCore · AlpacaMetal (+ Kernels/*.metal) · AlpacaModels 
 Tests/            unit, kernel, parser/fuzz, tokenizer and real-model integration tests (+ generated fixtures)
 Scripts/          fixture generators (Python, offline), model download, benchmark harness, llama.cpp comparison
 Benchmarks/       raw JSON results for every number quoted in the docs
+Experiments/      evaluation harness, scripts and raw results behind the technical report
+paper/            technical report (LaTeX source and PDF)
 Docs/             ARCHITECTURE · NUMERICAL_VALIDATION · PERFORMANCE · MODEL_SUPPORT · DEVELOPMENT
 Examples/iOS/     SwiftUI reference app
 ```
