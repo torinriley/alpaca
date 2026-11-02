@@ -54,19 +54,19 @@ alpaca.swift implements the Llama decoder family: RMSNorm~\cite{rmsnorm}, rotary
 
 \paragraph{Profiles.} Per-stage GPU time from \texttt{alpaca profile}, which uses GPU timestamps at encoder boundaries; stages are serialised, so their sum can differ slightly from the unprofiled pass.
 
-\section{Speed against llama.cpp}
+\section{Speed against llama.cpp (before the GEMM changes)}
 \label{sec:speed}
 \begin{table*}[t]\centering\small
 \input{tab_speed.tex}
-\caption{Throughput of alpaca (tokens/s, median of 7) and, in parentheses, its ratio to llama.cpp on the same file, pass~1. Prefill columns are prompt lengths, decode columns context lengths. Ratios above 1 favour alpaca. Pass~2 values are in Table~\ref{tab:repro} and the raw data.}
+\caption{Throughput of the base code (before the changes of Section~\ref{sec:scaling}; tokens/s, median of 7) and, in parentheses, its ratio to llama.cpp on the same file, pass~1. Prefill columns are prompt lengths, decode columns context lengths. Ratios above 1 favour alpaca. Pass~2 values are in Table~\ref{tab:repro} and the raw data.}
 \label{tab:speed}
 \end{table*}
 \begin{figure*}[t]\centering
 \includegraphics[width=0.82\textwidth]{figs/ratio.pdf}
-\caption{alpaca/llama.cpp throughput ratio (pass~1) against prompt length (left) and context length (right). Colour is model size, line style and marker are weight format. The 1.7B model (red) falls below parity for prefill $\ge 512$ tokens.}
+\caption{alpaca/llama.cpp throughput ratio (pass~1) against prompt length (left) and context length (right). Colour is model size, line style and marker are weight format. Base code: the 1.7B model (red) falls below parity for prefill $\ge 512$ tokens; Table~\ref{tab:scaling} shows the result after the changes.}
 \label{fig:ratio}
 \end{figure*}
-Table~\ref{tab:speed} and Figure~\ref{fig:ratio} give the results. Over both passes:
+Table~\ref{tab:speed} and Figure~\ref{fig:ratio} give the results for the base code, i.e.\ before the changes of Section~\ref{sec:scaling}. Over both passes:
 \begin{itemize}\setlength\itemsep{0pt}
 \item \textbf{135M and 360M, prefill $\ge$512 tokens:} 1.25--1.68$\times$ llama.cpp in all 12 cells per pass. This reproduces the earlier 135M result (1.3--1.7$\times$).
 \item \textbf{135M and 360M, short prompts ($n{=}16$):} 0.49--0.95$\times$; alpaca is slower, as the earlier report also found.
@@ -75,7 +75,7 @@ Table~\ref{tab:speed} and Figure~\ref{fig:ratio} give the results. Over both pas
 \item \textbf{1.7B, decode:} 0.74--1.01$\times$, roughly at parity except for one Q8\_0 cell at context 2048 (0.74$\times$ in pass~1, 1.01$\times$ in pass~2), which we regard as unresolved.
 \end{itemize}
 
-\section{Why the advantage does not scale}
+\section{Why the advantage did not scale (before the GEMM changes)}
 \label{sec:why}
 \begin{figure}[t]\centering
 \includegraphics[width=\columnwidth]{figs/stages.pdf}
@@ -152,7 +152,7 @@ Table~\ref{tab:quality} reports paired costs. Q8\_0 is effectively free: $\Delta
 \end{figure}
 Figure~\ref{fig:sustained} shows 199 consecutive 512-token generations on SmolLM2-360M Q8\_0 (about 7.3~minutes of continuous GPU work). Throughput does not decay: the mean of the first 20 runs is 264.1 tok/s and of the last 20 is 264.2 tok/s, and the reported thermal state stayed \emph{nominal}. Between roughly minutes 3.5 and 6.5, 55 of the 199 runs fell below 255 tok/s (minimum 209) before throughput recovered; we were running short analysis scripts on the same machine in that period and did not control for it, so we do not attribute the stretch to the GPU. A 200th run stalled for 302~s for a reason we did not identify (machine-level, not thermal) and is excluded; the run therefore covered about 7.3 rather than the planned 10 minutes. This is a Mac with active cooling. It says little about a phone, and neither power nor energy was measured.
 
-\section{Variance and reproducibility}
+\section{Variance and reproducibility (base code)}
 \label{sec:variance}
 \begin{table}[t]\centering\small
 \input{tab_repro.tex}
