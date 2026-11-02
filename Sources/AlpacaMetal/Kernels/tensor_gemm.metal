@@ -11,7 +11,9 @@
 // below, so the GEMM itself only ever sees half weights; the scratch is a single matrix, never the whole model.
 // Dequantisation to half rounds d*q to 11 significant bits (relative 2^-11), the dominant extra error of this path.
 //
-// Grid: threadgroups = (ceil(N / 64), ceil(T / 64)), 128 threads (4 simdgroups). Edge tiles are handled by the
+// Grid: threadgroups = (ceil(T / TT), ceil(N / TR)), 32*SG threads. Two instantiations are built (TT = 64 and 128, TR = 64, SG = 4); the host
+// picks the 128-token tile for large matrices and chunks (see KernelEncoder.useBigTile). The token tile is the fastest-varying grid axis, so
+// threadgroups that run concurrently share one weight tile (read from DRAM once, then from cache) instead of streaming different weight tiles. Edge tiles are handled by the
 // tensor slices' built-in bounds checks.
 #include <metal_stdlib>
 #include <metal_tensor>
@@ -19,54 +21,44 @@
 using namespace metal;
 using namespace mpp::tensor_ops;
 
-constant constexpr int TG_TOKENS = 64;
-constant constexpr int TG_ROWS = 64;
 
-kernel void gemm_tensor_half_w(device half* W [[buffer(0)]], device half* X [[buffer(1)]], device float* Y [[buffer(2)]],
-                               constant uint& K [[buffer(3)]], constant uint& N [[buffer(4)]], constant uint& T [[buffer(5)]],
-                               uint2 tg [[threadgroup_position_in_grid]]) {
+template <int TT, int TR, int SG, bool ACC>
+static inline void gemm_body(device half* W, device half* X, device float* Y, uint K, uint N, uint T, uint2 tg) {
     tensor<device half, dextents<int32_t, 2>, tensor_inline> A(X, dextents<int32_t, 2>(K, T));
     tensor<device half, dextents<int32_t, 2>, tensor_inline> B(W, dextents<int32_t, 2>(K, N));
     tensor<device float, dextents<int32_t, 2>, tensor_inline> C(Y, dextents<int32_t, 2>(N, T));
-    constexpr auto desc = matmul2d_descriptor(TG_TOKENS, TG_ROWS, static_cast<int>(dynamic_extent), false, true, true);
-    matmul2d<desc, execution_simdgroups<4>> op;
-    auto mA = A.slice(0, tg.y * TG_TOKENS);
-    auto mB = B.slice(0, tg.x * TG_ROWS);
-    auto mC = C.slice(tg.x * TG_ROWS, tg.y * TG_TOKENS);
+    constexpr auto desc = matmul2d_descriptor(TT, TR, static_cast<int>(dynamic_extent), false, true, true,
+                                              ACC ? matmul2d_descriptor::mode::multiply_accumulate : matmul2d_descriptor::mode::multiply);
+    matmul2d<desc, execution_simdgroups<SG>> op;
+    auto mA = A.slice(0, tg.x * TT);
+    auto mB = B.slice(0, tg.y * TR);
+    auto mC = C.slice(tg.y * TR, tg.x * TT);
     op.run(mA, mB, mC);
 }
 
-// Same product accumulated into an existing Y (Y += X·Wᵀ): fuses the residual connection into the projection,
-// removing a separate add kernel and the temporary output buffer.
-kernel void gemm_tensor_half_w_acc(device half* W [[buffer(0)]], device half* X [[buffer(1)]], device float* Y [[buffer(2)]],
-                                   constant uint& K [[buffer(3)]], constant uint& N [[buffer(4)]], constant uint& T [[buffer(5)]],
-                                   uint2 tg [[threadgroup_position_in_grid]]) {
-    tensor<device half, dextents<int32_t, 2>, tensor_inline> A(X, dextents<int32_t, 2>(K, T));
-    tensor<device half, dextents<int32_t, 2>, tensor_inline> B(W, dextents<int32_t, 2>(K, N));
-    tensor<device float, dextents<int32_t, 2>, tensor_inline> C(Y, dextents<int32_t, 2>(N, T));
-    constexpr auto desc = matmul2d_descriptor(TG_TOKENS, TG_ROWS, static_cast<int>(dynamic_extent), false, true, true,
-                                              matmul2d_descriptor::mode::multiply_accumulate);
-    matmul2d<desc, execution_simdgroups<4>> op;
-    auto mA = A.slice(0, tg.y * TG_TOKENS);
-    auto mB = B.slice(0, tg.x * TG_ROWS);
-    auto mC = C.slice(tg.x * TG_ROWS, tg.y * TG_TOKENS);
-    op.run(mA, mB, mC);
-}
+#define GEMM_KERNEL(NAME, TT, TR, SG, ACC) \
+kernel void NAME(device half* W [[buffer(0)]], device half* X [[buffer(1)]], device float* Y [[buffer(2)]], \
+                 constant uint& K [[buffer(3)]], constant uint& N [[buffer(4)]], constant uint& T [[buffer(5)]], \
+                 uint2 tg [[threadgroup_position_in_grid]]) { gemm_body<TT, TR, SG, ACC>(W, X, Y, K, N, T, tg); }
+// Y = X·Wᵀ and, with ACC, Y += X·Wᵀ (fuses the residual connection into the projection: no add kernel, no temporary output).
+GEMM_KERNEL(gemm_tensor_half_w_t64, 64, 64, 4, false)
+GEMM_KERNEL(gemm_tensor_half_w_t128, 128, 64, 4, false)
+GEMM_KERNEL(gemm_tensor_half_w_acc_t64, 64, 64, 4, true)
+GEMM_KERNEL(gemm_tensor_half_w_acc_t128, 128, 64, 4, true)
 
 // SwiGLU feed-forward input in one pass:  Y = silu(X·Wgateᵀ) ⊙ (X·Wupᵀ).
 // Both products of a tile stay in registers (two cooperative tensors with identical layout), so neither the gate nor the up
 // activations are ever written to memory and no separate silu·mul pass runs.
-kernel void gemm_tensor_gateup_silu(device half* Wg [[buffer(0)]], device half* Wu [[buffer(1)]], device half* X [[buffer(2)]],
-                                    device half* Y [[buffer(3)]], constant uint& K [[buffer(4)]], constant uint& N [[buffer(5)]],
-                                    constant uint& T [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]]) {
+template <int TT, int TR, int SG>
+static inline void gateup_body(device half* Wg, device half* Wu, device half* X, device half* Y, uint K, uint N, uint T, uint2 tg) {
     tensor<device half, dextents<int32_t, 2>, tensor_inline> A(X, dextents<int32_t, 2>(K, T));
     tensor<device half, dextents<int32_t, 2>, tensor_inline> Bg(Wg, dextents<int32_t, 2>(K, N));
     tensor<device half, dextents<int32_t, 2>, tensor_inline> Bu(Wu, dextents<int32_t, 2>(K, N));
-    constexpr auto desc = matmul2d_descriptor(TG_TOKENS, TG_ROWS, static_cast<int>(dynamic_extent), false, true, true);
-    matmul2d<desc, execution_simdgroups<4>> op;
-    auto mA = A.slice(0, tg.y * TG_TOKENS);
-    auto mBg = Bg.slice(0, tg.x * TG_ROWS);
-    auto mBu = Bu.slice(0, tg.x * TG_ROWS);
+    constexpr auto desc = matmul2d_descriptor(TT, TR, static_cast<int>(dynamic_extent), false, true, true);
+    matmul2d<desc, execution_simdgroups<SG>> op;
+    auto mA = A.slice(0, tg.x * TT);
+    auto mBg = Bg.slice(0, tg.y * TR);
+    auto mBu = Bu.slice(0, tg.y * TR);
     auto cG = op.template get_destination_cooperative_tensor<decltype(mA), decltype(mBg), float>();
     auto cU = op.template get_destination_cooperative_tensor<decltype(mA), decltype(mBu), float>();
     op.run(mA, mBg, cG);
@@ -76,14 +68,21 @@ kernel void gemm_tensor_gateup_silu(device half* Wg [[buffer(0)]], device half* 
         if (cG.is_valid_element(i)) {
             float g = cG[i];
             float r = (g / (1.0f + precise::exp(-g))) * cU[i];
-            // Local (column, row) of this element inside the 64 x 64 output tile; the cooperative tensor has no
-            // float -> half store, so write converted elements directly (bounds-checked for edge tiles).
+            // Local (column, row) of this element inside the output tile; the cooperative tensor has no float -> half store,
+            // so write converted elements directly (bounds-checked for edge tiles).
             auto ids = cG.get_multidimensional_index(i);
-            uint col = tg.x * TG_ROWS + uint(ids[0]), row = tg.y * TG_TOKENS + uint(ids[1]);
+            uint col = tg.y * TR + uint(ids[0]), row = tg.x * TT + uint(ids[1]);
             if (col < N && row < T) Y[(ulong)row * N + col] = half(r);
         }
     }
 }
+
+#define GATEUP_KERNEL(NAME, TT, TR, SG) \
+kernel void NAME(device half* Wg [[buffer(0)]], device half* Wu [[buffer(1)]], device half* X [[buffer(2)]], device half* Y [[buffer(3)]], \
+                 constant uint& K [[buffer(4)]], constant uint& N [[buffer(5)]], constant uint& T [[buffer(6)]], \
+                 uint2 tg [[threadgroup_position_in_grid]]) { gateup_body<TT, TR, SG>(Wg, Wu, X, Y, K, N, T, tg); }
+GATEUP_KERNEL(gemm_tensor_gateup_silu_t64, 64, 64, 4)
+GATEUP_KERNEL(gemm_tensor_gateup_silu_t128, 128, 64, 4)
 
 // Expand quantised weight rows to half, 4 threads per 32-element block with vector loads/stores (196 GB/s measured vs 73 GB/s for
 // one thread per block). Grid: (K / 32 * 4, N).

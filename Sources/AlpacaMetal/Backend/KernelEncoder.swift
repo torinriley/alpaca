@@ -31,6 +31,8 @@ public struct GPUMatrix: @unchecked Sendable {
     public let dtype: DType
     public let rows: Int
     public let cols: Int
+    /// Optional half-precision copy of a quantised matrix (the prefill weight cache); the tensor-op GEMM uses it instead of re-expanding every chunk.
+    public var halfCopy: MTLBuffer? = nil
 }
 
 /// Encodes alpaca's kernels onto a compute encoder. All kernels run on one serial encoder, so ordering
@@ -60,6 +62,11 @@ struct KernelEncoder {
     nonisolated(unsafe) static var gemmMinTokens = 32
     /// Batches at least this large use the tensor-op GEMM when `.fast` precision is selected and supported.
     nonisolated(unsafe) static var tensorGEMMMinTokens = Tuning.int("ALPACA_TENSOR_MIN_TOKENS", 16)
+    /// The tensor-op GEMMs run with a 128-token tile (instead of 64) when the matrix has at least `bigTileMinElements` weights and the chunk
+    /// has at least `bigTileMinTokens` tokens: the larger tile halves the weight and activation traffic per FLOP, which is what limits
+    /// large models (1.7B: prefill 1.5-2x faster), but under-fills the GPU for small matrices and short chunks (135M/360M regress).
+    static let bigTileMinElements = Tuning.int("ALPACA_BIG_TILE_MIN_ELEMENTS", 2_000_000), bigTileMinTokens = Tuning.int("ALPACA_BIG_TILE_MIN_TOKENS", 256)
+    static func useBigTile(rows: Int, cols: Int, tokens: Int) -> Bool { tokens >= bigTileMinTokens && rows * cols >= bigTileMinElements }
     /// Batches at least this large use the tiled simdgroup-matrix attention kernel (f16 KV, head dim 64 or 128).
     nonisolated(unsafe) static var prefillAttentionMinTokens = 8
     /// Zero rows appended to every KV buffer so the tiled attention kernel can read whole 32-position blocks.
@@ -170,6 +177,7 @@ struct KernelEncoder {
     /// Expands a quantised matrix into `target` (half) or returns its own buffer when already half.
     private func expandToHalf(_ w: GPUMatrix, into target: MTLBuffer?) throws -> (MTLBuffer, Int) {
         guard w.dtype != .float16 else { return (w.buffer, w.offset) }
+        if let h = w.halfCopy { return (h, 0) }
         let name = w.dtype == .q8_0 ? "dequant_q8_0_to_half" : "dequant_q4_0_to_half"
         let dp = try context.pipeline(name)
         encoder.setComputePipelineState(dp)
@@ -183,13 +191,14 @@ struct KernelEncoder {
     /// expanded into the scratch first. Call only when `canUseTensorGEMM(w, tokens:)` holds.
     func projectHalf(_ w: GPUMatrix, xHalf x: MTLBuffer, y: MTLBuffer, tokens: Int, accumulate: Bool) throws {
         let weights = try expandToHalf(w, into: dequantScratch)
-        let gp = try context.pipeline(accumulate ? "gemm_tensor_half_w_acc" : "gemm_tensor_half_w")
+        let big = Self.useBigTile(rows: w.rows, cols: w.cols, tokens: tokens)
+        let gp = try context.pipeline((accumulate ? "gemm_tensor_half_w_acc" : "gemm_tensor_half_w") + (big ? "_t128" : "_t64"))
         encoder.setComputePipelineState(gp)
         encoder.setBuffer(weights.0, offset: weights.1, index: 0)
         encoder.setBuffer(x, offset: 0, index: 1)
         encoder.setBuffer(y, offset: 0, index: 2)
         set(UInt32(w.cols), 3); set(UInt32(w.rows), 4); set(UInt32(tokens), 5)
-        encoder.dispatchThreadgroups(MTLSize(width: (w.rows + 63) / 64, height: (tokens + 63) / 64, depth: 1),
+        encoder.dispatchThreadgroups(MTLSize(width: (tokens + (big ? 128 : 64) - 1) / (big ? 128 : 64), height: (w.rows + 63) / 64, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
     }
 
@@ -227,12 +236,13 @@ struct KernelEncoder {
     func gateUpSiluHalf(_ wg: GPUMatrix, _ wu: GPUMatrix, xHalf x: MTLBuffer, outHalf out: MTLBuffer, tokens: Int) throws {
         let g = try expandToHalf(wg, into: dequantScratch)
         let u = try expandToHalf(wu, into: dequantScratch2)
-        let p = try context.pipeline("gemm_tensor_gateup_silu")
+        let big = Self.useBigTile(rows: wg.rows, cols: wg.cols, tokens: tokens)
+        let p = try context.pipeline("gemm_tensor_gateup_silu" + (big ? "_t128" : "_t64"))
         encoder.setComputePipelineState(p)
         encoder.setBuffer(g.0, offset: g.1, index: 0); encoder.setBuffer(u.0, offset: u.1, index: 1)
         encoder.setBuffer(x, offset: 0, index: 2); encoder.setBuffer(out, offset: 0, index: 3)
         set(UInt32(wg.cols), 4); set(UInt32(wg.rows), 5); set(UInt32(tokens), 6)
-        encoder.dispatchThreadgroups(MTLSize(width: (wg.rows + 63) / 64, height: (tokens + 63) / 64, depth: 1),
+        encoder.dispatchThreadgroups(MTLSize(width: (tokens + (big ? 128 : 64) - 1) / (big ? 128 : 64), height: (wg.rows + 63) / 64, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
     }
 

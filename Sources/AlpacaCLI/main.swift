@@ -58,6 +58,7 @@ func loadOptions(_ a: Args) throws -> LoadOptions {
     o.contextLength = try a.int("context")
     if a.options["kv"] == "f32" { o.kvPrecision = .float32 }
     if a.flags.contains("exact-gemm") { o.prefillPrecision = .exact }
+    if a.flags.contains("prefill-cache") { o.prefillWeightCache = true }
     if let b = try a.int("prefill-batch") { o.prefillBatchSize = b }
     if let mb = try a.int("memory-budget-mb") { o.memoryBudgetBytes = mb << 20 }
     return o

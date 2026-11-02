@@ -20,6 +20,8 @@ public final class MetalLlamaModel: @unchecked Sendable {
     }
     let embedding: GPUMatrix
     let layers: [Layer]
+    /// Bytes of half-precision weight copies held for prefill (0 unless `prefillWeightCache` was requested and applies).
+    public let prefillCacheBytes: Int
     let outputNorm: GPUMatrix
     let output: GPUMatrix
     let ropeFreqs: MTLBuffer
@@ -35,7 +37,7 @@ public final class MetalLlamaModel: @unchecked Sendable {
     ///   - keepAlive: object that must outlive the GPU buffers (the mapping owner).
     public init(
         context: MetalContext, config: LlamaConfig, weights: LlamaWeights,
-        mappedRegion: (base: UnsafeRawPointer, length: Int)? = nil, keepAlive: AnyObject? = nil
+        mappedRegion: (base: UnsafeRawPointer, length: Int)? = nil, keepAlive: AnyObject? = nil, prefillWeightCache: Bool = false
     ) throws {
         try config.validate()
         try weights.validate(against: config)
@@ -76,13 +78,45 @@ public final class MetalLlamaModel: @unchecked Sendable {
         embedding = try matrix(weights.tokenEmbedding)
         output = weights.output != nil ? try matrix(weights.outputProjection) : embedding
         outputNorm = try upload(weights.outputNorm)
-        layers = try weights.layers.map { l in
+        var built = try weights.layers.map { l in
             Layer(attnNorm: try upload(l.attnNorm), wq: try matrix(l.wq), wk: try matrix(l.wk), wv: try matrix(l.wv), wo: try matrix(l.wo),
                   ffnNorm: try upload(l.ffnNorm), wGate: try matrix(l.wGate), wUp: try matrix(l.wUp), wDown: try matrix(l.wDown))
         }
+        var cacheBytes = 0
+        if prefillWeightCache && context.supportsTensorGEMM && built.contains(where: { $0.wq.dtype.isQuantized }) {
+            cacheBytes = try Self.buildPrefillCache(&built, context: context)
+        }
+        layers = built
+        prefillCacheBytes = cacheBytes
         let freqs = ropeFrequencies(headDim: config.headDim, theta: config.ropeTheta)
         ropeFreqs = try context.makeBuffer(copying: freqs, length: freqs.count * 4)
         zeroCopyWeightBytes = zeroCopy; copiedWeightBytes = copied
+    }
+
+
+    /// Expands every quantised per-layer projection once into a persistent half-precision buffer, so prefill GEMMs read half weights
+    /// directly instead of re-expanding each matrix for every chunk. Costs 2 bytes per weight of extra memory.
+    private static func buildPrefillCache(_ layers: inout [Layer], context: MetalContext) throws -> Int {
+        guard let cmd = context.queue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder() else { throw MetalError.commandFailed("prefill cache: no command buffer") }
+        var total = 0
+        func expand(_ w: GPUMatrix) throws -> GPUMatrix {
+            guard w.dtype.isQuantized else { return w }
+            var m = w
+            let out = try context.makeBuffer(length: w.rows * w.cols * 2); total += w.rows * w.cols * 2
+            enc.setComputePipelineState(try context.pipeline(w.dtype == .q8_0 ? "dequant_q8_0_to_half" : "dequant_q4_0_to_half"))
+            enc.setBuffer(w.buffer, offset: w.offset, index: 0); enc.setBuffer(out, offset: 0, index: 1)
+            var k = UInt32(w.cols); enc.setBytes(&k, length: 4, index: 2)
+            enc.dispatchThreads(MTLSize(width: w.cols / 32 * 4, height: w.rows, depth: 1), threadsPerThreadgroup: MTLSize(width: min(w.cols / 32 * 4, 32), height: 8, depth: 1))
+            m.halfCopy = out
+            return m
+        }
+        layers = try layers.map { l in
+            Layer(attnNorm: l.attnNorm, wq: try expand(l.wq), wk: try expand(l.wk), wv: try expand(l.wv), wo: try expand(l.wo),
+                  ffnNorm: l.ffnNorm, wGate: try expand(l.wGate), wUp: try expand(l.wUp), wDown: try expand(l.wDown))
+        }
+        enc.endEncoding(); cmd.commit(); cmd.waitUntilCompleted()
+        if let e = cmd.error { throw MetalError.commandFailed("prefill cache: \(e)") }
+        return total
     }
 
     /// Bytes a session with `capacity` positions and `maxBatch` prefill chunk allocates (KV cache + scratch).

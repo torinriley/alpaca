@@ -30,6 +30,9 @@ public struct LoadOptions: Sendable {
     /// `.fast` runs batched projections on the GPU's matrix hardware where available (half-precision operands, float32
     /// accumulation, ~2.5× faster prefill on M5); `.exact` keeps float32 operands. Decode is unaffected.
     public var prefillPrecision: GEMMPrecision = .fast
+    /// Keeps a half-precision copy of every quantised projection (2 bytes per weight of extra memory, built at load) so prefill skips the per-chunk
+    /// weight expansion. Speeds up Q8_0/Q4_0 prefill on large models; ignored for F16 weights and without the matrix hardware.
+    public var prefillWeightCache: Bool = false
     public init() {}
 }
 
