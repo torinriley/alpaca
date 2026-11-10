@@ -2,9 +2,36 @@
 
 *Author: Torin Etheridge · 2026-10-09 · MIT License*
 
+## 0.2.0 — 2026-11-10 (pre-release)
+
+### Performance: GEMM Scaling
+
+Prefill performance now scales to larger models (SmolLM2-360M, 1.7B):
+- **Adaptive GEMM tile size:** 128×64 tile for large matrices (1.7B), 64×64 for small models
+- **Shared-weight launch order:** Concurrent threadgroups share weight tiles, improving cache utilization
+- **Optional prefill weight cache:** `--prefill-cache` flag maintains half-precision copies of quantized weights (+2 bytes per weight), eliminating per-chunk expansion overhead for Q8_0/Q4_0 on large models
+
+**Impact:** SmolLM2-1.7B prefill with `--prefill-cache` is now 1.1–1.3× faster than llama.cpp at 128–4096 tokens (previously slower). Small models (135M, 360M) maintain their performance advantage.
+
+### Documentation
+
+- **Technical report:** [paper/alpaca-swift.pdf](paper/alpaca-swift.pdf) — comprehensive evaluation at 135M, 360M, and 1.7B parameters across F16, Q8_0, and Q4_0 formats with detailed GEMM scaling analysis
+- **Evaluation harness:** `Experiments/AlpacaEval` for systematic benchmarking across model sizes
+- Added scaling study results and graphs to README
+- GitHub Sponsors funding configuration
+
+### Community
+
+- Swift Package Index configuration (`.spi.yml`) to restrict builds to Apple platforms
+- Status badges in README (CI, release, license, Swift versions)
+
+### Breaking changes
+
+None — this release is backward compatible with 0.1.0.
+
 ## Unreleased
 
-Prefill (branch `perf/quantized-prefill`): half-precision activations into the tensor-op GEMM, tensor-op causal attention with a swept tile shape, vectorised weight expansion. Q8_0 prefill at 2048 tokens 17.0k → 30.8k tok/s, at 4096 tokens 12.3k → 24.1k; prefill is now 1.3–1.7× llama.cpp from 128 to 4096 tokens (still behind for ≤ 24-token prompts).
+(No unreleased changes)
 
 ## 0.1.0 — 2026-10-09 (pre-release)
 

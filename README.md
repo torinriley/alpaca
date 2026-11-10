@@ -3,28 +3,122 @@
 [![CI](https://github.com/torinriley/alpaca/actions/workflows/ci.yml/badge.svg)](https://github.com/torinriley/alpaca/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/torinriley/alpaca?label=release)](https://github.com/torinriley/alpaca/tags)
 [![License: MIT](https://img.shields.io/github/license/torinriley/alpaca)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/torinriley/alpaca?style=flat)](https://github.com/torinriley/alpaca/stargazers)
+[![Swift Package Index](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Ftorinriley%2Falpaca%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/torinriley/alpaca)
 
 **Native language model inference for Apple Silicon.**
 
-A Swift-first inference runtime with custom Metal compute kernels, GGUF model loading and on-device autoregressive generation, built independently for macOS and iOS, with no llama.cpp, MLX, Core ML, ONNX or Python at runtime.
+A from-scratch Swift inference engine with custom Metal kernels — no llama.cpp, MLX, Core ML, ONNX, or Python at runtime.
+
+<!-- Demo GIF placeholder: TODO add demo GIF at Docs/images/demo.gif
+<p align="center">
+  <img src="Docs/images/demo.gif" alt="alpaca.swift demo" width="600">
+</p>
+-->
+
+## Status
+
+**0.2.0-pre** – One architecture family (Llama-style decoder, byte-level BPE) and three weight formats (F16, Q8_0, Q4_0) are implemented and validated against PyTorch. Prefill is 1.3–1.7× faster than llama.cpp at 128–4096 tokens on the validation model (SmolLM2-135M-Instruct, Q8_0, Apple M5).
+
+**Caveats:** All benchmarks measured on one Apple M5 (16 GB) machine. The fastest prefill path requires an Apple10-family GPU (M5/A19) and macOS/iOS 26; elsewhere it runs at roughly 1/3 to 1/2 throughput. **Nothing has been run on a physical iPhone or iPad yet**; the library and example app compile for the iOS Simulator only.
 
 *Author: Torin Etheridge · 2026-10-09 · MIT License*
 
-> **Status: 0.1.0 (pre-release).** One architecture family (Llama-style decoder, byte-level BPE) and three weight formats (F16, Q8_0, Q4_0) are implemented and validated against PyTorch. All measurements were taken on a single machine (Apple M5, 16 GB). **Nothing has been run on a physical iPhone or iPad yet**; the library and example app compile for the iOS Simulator only.
+## Quick start
+
+### Swift Package Manager
+
+```swift
+// Package.swift
+.package(url: "https://github.com/torinriley/alpaca.git", from: "0.2.0")
+```
+
+```swift
+// target dependency
+.product(name: "Alpaca", package: "alpaca")
+```
+
+### Usage
+
+```swift
+import Alpaca
+
+// Load a GGUF model (memory-mapped, async)
+let model = try await LanguageModel.load(from: modelURL)
+
+// Generate text with streaming
+let stream = model.generate(
+    prompt: "Explain how transformers work.",
+    configuration: .init(maxTokens: 256, temperature: 0.7, seed: 42)
+)
+
+for try await token in stream {
+    print(token.text, terminator: "")
+}
+
+// Check generation summary
+let summary = stream.summary  // tokens, tok/s, finish reason
+```
+
+### Command line
+
+```sh
+# Download the validation model (SmolLM2-135M-Instruct, Apache-2.0)
+Scripts/fetch_models.sh
+
+# Build
+swift build -c release
+
+# Generate text
+.build/release/alpaca generate Models/gguf/SmolLM2-135M-Instruct-Q8_0.gguf \
+  --chat --prompt "Name three colors." --stats
+
+# Benchmark
+.build/release/alpaca bench Models/gguf/SmolLM2-135M-Instruct-Q8_0.gguf \
+  --backend metal --json out.json
+
+# Profile GPU stages
+.build/release/alpaca profile Models/gguf/SmolLM2-135M-Instruct-Q8_0.gguf \
+  --tokens 2048 --context 2200
+```
+
+A SwiftUI reference app (model picker, streaming, cancellation, throughput and memory diagnostics) is in [`Examples/iOS/AlpacaDemo`](Examples/iOS/AlpacaDemo).
+
+## Benchmarks
+
+**Apple M5 (10-core GPU), 16 GB, macOS 27.0, Swift 6.4.** SmolLM2-135M-Instruct (30 layers, GQA 9/3, head dim 64). Median of 7 runs, greedy decoding, same GGUF files for both engines. Measurements taken on a machine with background load (compare within a graph, not across runs). Full method and data: [Docs/PERFORMANCE.md](Docs/PERFORMANCE.md) | [technical report](paper/alpaca-swift.pdf).
+
+**Q8_0 prefill and decode vs llama.cpp:**
+
+| Prompt tokens | alpaca.swift (tok/s) | llama.cpp | speedup |
+|---|---|---|---|
+| 128 | **24,106** | 18,326 | **1.32×** |
+| 2048 | **30,797** | 20,762 | **1.48×** |
+| 4096 | **24,069** | 15,388 | **1.56×** |
+| 16 | 3,420 | 4,743 | 0.72× |
+
+| Decode (context) | alpaca.swift (tok/s) | llama.cpp | speedup |
+|---|---|---|---|
+| 16 tokens | **582** | 441 | **1.32×** |
+| 2048 tokens | **456** | 367 | **1.24×** |
+
+**Additional formats:** Q4_0 decode at 16-token context: **712** tok/s (llama.cpp 518, **1.38×**). F16 decode: **360** tok/s (llama.cpp 319, **1.13×**).
+
+**Peak memory:** 175–194 MiB at 4400-token context (135M-parameter model).
+
+The [technical report](paper/alpaca-swift.pdf) extends the comparison to SmolLM2-360M and 1.7B, documents the GEMM scaling work that made prefill competitive at larger sizes, and explains why 16-token prompts are slower. For 1.7B with `--prefill-cache`, prefill is 1.1–1.3× faster than llama.cpp at 128–4096 tokens.
+
+## Contents
+
+[Highlights](#highlights) · [Capabilities](#capabilities) · [Results](#results) · [Numerical validation](#numerical-validation) · [Design](#design) · [Repository layout](#repository-layout) · [Reproducing the results](#reproducing-the-results) · [Limitations](#limitations) · [Roadmap](#roadmap) · [Citation](#citation) · [License](#license)
 
 ## Highlights
 
 - **Independent implementation.** Tensor engine, CPU reference ops, GGUF parser, BPE tokenizer, Llama forward pass, sampler and all Metal kernels are written in this repository. Python/PyTorch is used only offline to generate reference fixtures.
 - **Correctness first.** Every operation has a deterministic CPU reference and a test against independently generated vectors (numpy/PyTorch float64, the `gguf` package, Hugging Face `transformers`/`tokenizers`) with an explicit, justified tolerance. The CPU backend matches Hugging Face float32 to 5e-5 (F16) and 7e-5 (Q8_0) on logits; 191/191 tokenizer test strings produce identical token IDs; 72/72 greedy tokens match on every format.
-- **Competitive performance, measured.** (For SmolLM2-1.7B see the [technical report](paper/alpaca-swift.pdf): prefill is faster than llama.cpp from 128 tokens for F16 and with `--prefill-cache` for Q8_0, but 16-token prompts are slower.) On the validation model, same machine and files, alpaca prefills 1.3–1.7× faster than llama.cpp from 128 to 4096 tokens (Q8_0: 24.1k vs 18.3k tok/s at 128, 24.1k vs 15.4k at 4096) and decodes 1.02–1.38× faster at 16–4096 tokens of context. It is slower only for very short prompts (16 tokens: 0.72–0.90×). See [Docs/PERFORMANCE.md](Docs/PERFORMANCE.md) for the method, the bottleneck analysis and the optimisations that did *not* work.
-- **Technical report.** [paper/alpaca-swift.pdf](paper/alpaca-swift.pdf) evaluates alpaca against llama.cpp at 135M, 360M and 1.7B parameters in F16, Q8_0 and Q4_0, diagnoses why prefill did not scale to 1.7B, and measures the GEMM changes that fix it ([source](paper/alpaca-swift.tex), [experiments](Experiments)).
+- **Competitive performance, measured.** On the validation model (SmolLM2-135M-Instruct, Q8_0, Apple M5), alpaca.swift prefills 1.3–1.7× faster than llama.cpp from 128 to 4096 tokens and decodes 1.02–1.38× faster at 16–4096 tokens of context. It is slower only for very short prompts (16 tokens: 0.72–0.90×). The [technical report](paper/alpaca-swift.pdf) shows that with the GEMM scaling work, 1.7B prefill is also faster than llama.cpp with `--prefill-cache`. See [Docs/PERFORMANCE.md](Docs/PERFORMANCE.md) for the method, bottleneck analysis and optimizations.
+- **Technical report.** [paper/alpaca-swift.pdf](paper/alpaca-swift.pdf) evaluates alpaca.swift against llama.cpp at 135M, 360M and 1.7B parameters in F16, Q8_0 and Q4_0, diagnoses why prefill did not scale to 1.7B initially, and measures the GEMM changes that fix it ([LaTeX source](paper/alpaca-swift.tex), [experiments](Experiments)).
 - **Robust against hostile input.** The GGUF parser treats model files as untrusted: every length is bounded by the bytes actually present, all arithmetic is overflow-checked, and it survived 20,000 mutation-fuzzed files without a crash.
 - **Idiomatic API.** `async` loading, `AsyncSequence` token streaming, cancellation, seeded sampling, per-generation isolated sessions, and a memory-budget check that refuses to load a model that will not fit.
-
-## Contents
-
-[Capabilities](#capabilities) · [Quick start](#quick-start) · [Results](#results) · [Numerical validation](#numerical-validation) · [Design](#design) · [Repository layout](#repository-layout) · [Reproducing the results](#reproducing-the-results) · [Limitations](#limitations) · [Roadmap](#roadmap) · [Citation](#citation) · [License](#license)
 
 ## Capabilities
 
