@@ -163,6 +163,20 @@ struct KernelEncoder {
         encoder.dispatchThreads(MTLSize(width: table.cols, height: count, depth: 1), threadsPerThreadgroup: MTLSize(width: min(table.cols, 64), height: 1, depth: 1))
     }
 
+    /// Quantised weights are dequantised on the fly inside the tensor-op GEMM (no half copy in device memory) when K is a multiple of the
+    /// 64-element chunk and no half copy already exists. ALPACA_DISABLE_FUSED_DEQUANT=1 restores the expand-then-multiply path.
+    nonisolated(unsafe) static var fusedDequantEnabled = Tuning.int("ALPACA_DISABLE_FUSED_DEQUANT", 0) == 0
+    /// It pays only where the half round trip is expensive and is not repeated per token tile: a matrix of at least `fusedDequantMinElements`
+    /// (measured: 135M-class matrices of ~1M weights are faster with the expansion; 2048 x 8192 is ~35% faster fused at 128 tokens and 2.2x at 24)
+    /// and at most one token tile (each extra tile of a larger chunk dequantises the weights again, which loses to expanding once at 512 tokens).
+    nonisolated(unsafe) static var fusedDequantMinElements = Tuning.int("ALPACA_FUSED_DEQUANT_MIN_ELEMS", 1 << 21)
+    nonisolated(unsafe) static var fusedDequantMaxTiles = Tuning.int("ALPACA_FUSED_DEQUANT_MAX_TILES", 3)
+    static func canFuseDequantGEMM(_ w: GPUMatrix, tokens: Int) -> Bool {
+        fusedDequantEnabled && w.dtype.isQuantized && w.halfCopy == nil && w.cols % 64 == 0
+            && w.rows * w.cols >= fusedDequantMinElements
+            && tokens <= fusedDequantMaxTiles * (useBigTile(rows: w.rows, cols: w.cols, tokens: tokens) ? 128 : 64)
+    }
+
     /// Whether the half-activation tensor-op GEMM can run `w` for a batch of `tokens` (capability, size, scratch).
     static func canUseTensorGEMM(_ w: GPUMatrix, tokens: Int, precision: GEMMPrecision, context: MetalContext, scratch: MTLBuffer?) -> Bool {
         precision == .fast && context.supportsTensorGEMM && tokens >= tensorGEMMMinTokens && w.cols % 32 == 0
@@ -189,6 +203,18 @@ struct KernelEncoder {
     /// Y[tokens, rows] (+)= Xhalf[tokens, cols] · Wᵀ on the tensor-op GEMM. `x` holds half activations; quantised weights are
     /// expanded into the scratch first. Call only when `canUseTensorGEMM(w, tokens:)` holds.
     func projectHalf(_ w: GPUMatrix, xHalf x: MTLBuffer, y: MTLBuffer, tokens: Int, accumulate: Bool) throws {
+        if Self.canFuseDequantGEMM(w, tokens: tokens) {
+            let big = Self.useBigTile(rows: w.rows, cols: w.cols, tokens: tokens)
+            let gp = try context.pipeline("gemm_dq_\(w.dtype.description)" + (accumulate ? "_acc" : "") + (big ? "_t128" : "_t64"))
+            encoder.setComputePipelineState(gp)
+            encoder.setBuffer(w.buffer, offset: w.offset, index: 0)
+            encoder.setBuffer(x, offset: 0, index: 1)
+            encoder.setBuffer(y, offset: 0, index: 2)
+            set(UInt32(w.cols), 3); set(UInt32(w.rows), 4); set(UInt32(tokens), 5)
+            let tt = big ? 128 : 64
+            encoder.dispatchThreadgroups(MTLSize(width: (tokens + tt - 1) / tt, height: (w.rows + 63) / 64, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+            return
+        }
         let weights = try expandToHalf(w, into: dequantScratch)
         let big = Self.useBigTile(rows: w.rows, cols: w.cols, tokens: tokens)
         let gp = try context.pipeline((accumulate ? "gemm_tensor_half_w_acc" : "gemm_tensor_half_w") + (big ? "_t128" : "_t64"))
@@ -233,6 +259,17 @@ struct KernelEncoder {
 
     /// outHalf = half(silu(Xhalf·Wgᵀ) ⊙ (Xhalf·Wuᵀ)) in one tensor-op kernel: both products stay in registers.
     func gateUpSiluHalf(_ wg: GPUMatrix, _ wu: GPUMatrix, xHalf x: MTLBuffer, outHalf out: MTLBuffer, tokens: Int) throws {
+        if Self.canFuseDequantGEMM(wg, tokens: tokens) && wg.dtype == wu.dtype {
+            let big = Self.useBigTile(rows: wg.rows, cols: wg.cols, tokens: tokens)
+            let p = try context.pipeline("gateup_dq_\(wg.dtype.description)" + (big ? "_t128" : "_t64"))
+            encoder.setComputePipelineState(p)
+            encoder.setBuffer(wg.buffer, offset: wg.offset, index: 0); encoder.setBuffer(wu.buffer, offset: wu.offset, index: 1)
+            encoder.setBuffer(x, offset: 0, index: 2); encoder.setBuffer(out, offset: 0, index: 3)
+            set(UInt32(wg.cols), 4); set(UInt32(wg.rows), 5); set(UInt32(tokens), 6)
+            let tt = big ? 128 : 64
+            encoder.dispatchThreadgroups(MTLSize(width: (tokens + tt - 1) / tt, height: (wg.rows + 63) / 64, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+            return
+        }
         let g = try expandToHalf(wg, into: dequantScratch)
         let u = try expandToHalf(wu, into: dequantScratch2)
         let big = Self.useBigTile(rows: wg.rows, cols: wg.cols, tokens: tokens)

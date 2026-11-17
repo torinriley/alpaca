@@ -126,6 +126,36 @@ final class KernelTests: XCTestCase {
         }
     }
 
+    /// The tensor-op GEMM that dequantises weights inside the kernel (no half copy in device memory): forced on for small matrices
+    /// (it normally applies only to large ones), plain, accumulating and gate+up+silu variants, every quantised format, edge tiles in N and T.
+    func testFusedDequantTensorGEMMAllFormats() throws {
+        try XCTSkipUnless(ops.context.supportsTensorGEMM, "no tensor-op GEMM on this device")
+        let saved = KernelEncoder.fusedDequantMinElements
+        KernelEncoder.fusedDequantMinElements = 0
+        defer { KernelEncoder.fusedDequantMinElements = saved }
+        let (k, n) = (512, 200)
+        func weights(_ dtype: DType, seed: UInt64) throws -> Tensor {
+            if dtype == .q8_0 || dtype == .q4_0 { return try quantize(rand([n, k], seed: seed, scale: 0.3).toFloatArray(), to: dtype).reshaped([n, k]) }
+            return try randomBlocks(dtype, shape: [n, k], seed: seed)
+        }
+        for dtype in [DType.q8_0, .q4_0] + Self.newFormats where dtype.isQuantized {
+            let wg = try weights(dtype, seed: 11), wu = try weights(dtype, seed: 12)
+            for t in [3, 40, 150] {
+                let x = try rand([t, k], seed: 13 + UInt64(t))
+                let exact = try CPUOps.linear(x, weight: wg).toFloatArray().map(Double.init)
+                let m = ErrorMetrics(actual: try ops.linear(x, weight: wg, precision: .fast).toFloatArray(), expected: exact)
+                XCTAssertLessThan(m.maxRelativeToPeak, 2e-3, "linear \(dtype) T=\(t): \(m)")
+                let res = try rand([t, n], seed: 14)
+                let accExpected = try CPUOps.add(res, CPUOps.linear(x, weight: wg)).toFloatArray().map(Double.init)
+                let ma = ErrorMetrics(actual: try ops.linearAdd(x, weight: wg, residual: res, precision: .fast).toFloatArray(), expected: accExpected)
+                XCTAssertLessThan(ma.maxRelativeToPeak, 2e-3, "linearAdd \(dtype) T=\(t): \(ma)")
+                let cpu = try CPUOps.mul(CPUOps.silu(CPUOps.linear(x, weight: wg)), CPUOps.linear(x, weight: wu))
+                let mg = ErrorMetrics(actual: try ops.gateUpSilu(x, gate: wg, up: wu, precision: .fast).toFloatArray(), expected: try cpu.toFloatArray().map(Double.init))
+                XCTAssertLessThan(mg.maxRelativeToPeak, 5e-3, "gate+up \(dtype) T=\(t): \(mg)")
+            }
+        }
+    }
+
     func testEmbeddingNewFormats() throws {
         for dtype in Self.newFormats {
             let table = try randomBlocks(dtype, shape: [50, 512], seed: 31)

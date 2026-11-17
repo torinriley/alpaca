@@ -36,7 +36,7 @@ constant constexpr int FMT_Q4_1 = 3, FMT_Q5_0 = 4, FMT_Q5_1 = 5, FMT_Q2_K = 6, F
 
 template <int FMT> inline uint fmt_block_elems() { return FMT >= FMT_Q2_K && FMT <= FMT_Q6_K ? 256u : (FMT == FMT_BF16 ? 1u : 32u); }
 template <int FMT> inline uint fmt_block_bytes() {
-    return FMT == FMT_Q4_1 ? 20u : FMT == FMT_Q5_0 ? 22u : FMT == FMT_Q5_1 ? 24u : FMT == FMT_Q2_K ? 84u : FMT == FMT_Q3_K ? 110u
+    return FMT == 1 ? 34u : FMT == 2 ? 18u : FMT == FMT_Q4_1 ? 20u : FMT == FMT_Q5_0 ? 22u : FMT == FMT_Q5_1 ? 24u : FMT == FMT_Q2_K ? 84u : FMT == FMT_Q3_K ? 110u
          : FMT == FMT_Q4_K ? 144u : FMT == FMT_Q5_K ? 176u : FMT == FMT_Q6_K ? 210u : 2u;
 }
 template <int FMT> inline ulong fmt_row_bytes(uint K) { return (ulong)(K / fmt_block_elems<FMT>()) * fmt_block_bytes<FMT>(); }
@@ -60,7 +60,18 @@ inline float2 k4_scale_min(device const uchar* q, uint j) {
 
 template <int FMT>
 inline void dq8(device const uchar* row, uint u, thread float4& a, thread float4& b) {
-    if (FMT == FMT_BF16) {
+    if (FMT == 1) {            // q8_0 (hand-tuned kernels exist; this serves the fused-dequant GEMM)
+        device const uchar* p = row + (ulong)(u >> 2) * 34;
+        const float d = ld_half(p);
+        device const packed_char4* q = (device const packed_char4*)(p + 2 + (u & 3) * 8);
+        a = d * float4(q[0]); b = d * float4(q[1]);
+    } else if (FMT == 2) {     // q4_0
+        const uint j = u & 3;
+        device const uchar* p = row + (ulong)(u >> 2) * 18;
+        const float d = ld_half(p);
+        float4 x, y; nibbles8(p + 2 + (j & 1) * 8, j >= 2, x, y);
+        a = d * (x - 8.0f); b = d * (y - 8.0f);
+    } else if (FMT == FMT_BF16) {
         device const packed_ushort4* p = (device const packed_ushort4*)(row + (ulong)u * 16);
         ushort4 x = ushort4(p[0]), y = ushort4(p[1]);
         a = as_type<float4>(uint4(x) << 16); b = as_type<float4>(uint4(y) << 16);

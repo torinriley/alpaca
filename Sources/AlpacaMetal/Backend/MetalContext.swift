@@ -91,10 +91,18 @@ public final class MetalContext: @unchecked Sendable {
               let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path).filter({ $0.hasPrefix("tensor_") && $0.hasSuffix(".metal") }).sorted(),
               !files.isEmpty
         else { return nil }
-        let source = files.compactMap { try? String(contentsOf: dir.appendingPathComponent($0), encoding: .utf8) }.joined(separator: "\n")
+        // common.metal (weight-format dequantisation primitives) is prepended with its local #includes stripped, as for the main library.
+        let common = ((try? String(contentsOf: dir.appendingPathComponent("common.metal"), encoding: .utf8)) ?? "")
+            .split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.hasPrefix("#include \"") }.joined(separator: "\n")
+        let source = common + "\n" + files.compactMap { try? String(contentsOf: dir.appendingPathComponent($0), encoding: .utf8) }.joined(separator: "\n")
         let options = MTLCompileOptions()
         options.languageVersion = metal4
-        return try? device.makeLibrary(source: source, options: options)
+        do { return try device.makeLibrary(source: source, options: options) }
+        catch {
+            // A broken tensor-op library must not fail silently: every prefill would quietly take the slower fallback kernels.
+            FileHandle.standardError.write(Data("alpaca: warning: tensor-op shader library failed to compile; using the simdgroup-matrix fallback. \(error)\n".utf8))
+            return nil
+        }
     }
 
     public var supportsTensorGEMM: Bool { tensorLibrary != nil }
