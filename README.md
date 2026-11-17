@@ -17,7 +17,7 @@ A from-scratch Swift inference engine with custom Metal kernels — no llama.cpp
 
 ## Status
 
-**0.2.0-pre** – One architecture family (Llama-style decoder, byte-level BPE) and three weight formats (F16, Q8_0, Q4_0) are implemented and validated against PyTorch. Prefill is 1.3–1.7× faster than llama.cpp at 128–4096 tokens on the validation model (SmolLM2-135M-Instruct, Q8_0, Apple M5).
+**0.2.0-pre** – One architecture family (Llama-style decoder, byte-level BPE, including Llama 3.1/3.2) and twelve weight formats (F16, BF16, Q8_0, Q5_0, Q5_1, Q4_0, Q4_1, Q2_K–Q6_K) are implemented; the original three formats are validated against PyTorch and the rest against llama.cpp output. See [Docs/FEATURES.md](Docs/FEATURES.md) for what the latest work added, how it was checked and what is not done. Prefill is 1.3–1.7× faster than llama.cpp at 128–4096 tokens on the validation model (SmolLM2-135M-Instruct, Q8_0, Apple M5).
 
 **Caveats:** All benchmarks measured on one Apple M5 (16 GB) machine. The fastest prefill path requires an Apple10-family GPU (M5/A19) and macOS/iOS 26; elsewhere it runs at roughly 1/3 to 1/2 throughput. **Nothing has been run on a physical iPhone or iPad yet**; the library and example app compile for the iOS Simulator only.
 
@@ -79,6 +79,13 @@ swift build -c release
 # Profile GPU stages
 .build/release/alpaca profile Models/gguf/SmolLM2-135M-Instruct-Q8_0.gguf \
   --tokens 2048 --context 2200
+
+# Print the token ids a model sees
+.build/release/alpaca tokenize Models/gguf/SmolLM2-135M-Instruct-Q8_0.gguf --prompt "Hello, world!"
+
+# Opt-in prompt-lookup speculative decoding (greedy only; identical output)
+.build/release/alpaca generate Models/gguf/SmolLM2-135M-Instruct-Q8_0.gguf \
+  --temperature 0 --speculate 7 --prompt "def fibonacci(n):"
 ```
 
 A SwiftUI reference app (model picker, streaming, cancellation, throughput and memory diagnostics) is in [`Examples/iOS/AlpacaDemo`](Examples/iOS/AlpacaDemo).
@@ -124,11 +131,11 @@ The [technical report](paper/alpaca-swift.pdf) extends the comparison to SmolLM2
 
 | | |
 |---|---|
-| Architecture | Llama-style decoder: RMSNorm, RoPE (no scaling), grouped-query attention, SwiGLU, tied or untied output head |
-| Weight formats (GGUF v2/v3) | F16, Q8_0, Q4_0 used in place from the memory-mapped file; Q4_1 tensors are expanded to F16 at load and reported |
+| Architecture | Llama-style decoder: RMSNorm, RoPE (Llama 3.x frequency scaling supported), grouped-query attention, SwiGLU, tied or untied output head |
+| Weight formats (GGUF v2/v3) | F16, BF16, Q8_0, Q5_0, Q5_1, Q4_0, Q4_1 and the K-quants Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, all used in place from the memory-mapped file ([Docs/FORMATS.md](Docs/FORMATS.md)); IQ-quants are rejected |
 | Metal backend | Tensor-op causal prefill attention and GEMM (Metal 4, Apple10-family GPUs) with simdgroup-matrix fallbacks · split-K GQA decode attention · fused single-token kernels · GPU-resident greedy decoding · f16 or f32 KV cache |
 | CPU backend | Deterministic reference implementation (testing, debugging, machines without Metal) |
-| Tokenizer | Byte-level BPE with the `gpt2` and `smollm` pre-tokenizers, UTF-8-safe streaming decode |
+| Tokenizer | Byte-level BPE with the `gpt2`, `smollm` and `llama-bpe` pre-tokenizers, UTF-8-safe streaming decode |
 | Sampling | Greedy, temperature, top-k, top-p, seeded RNG, EOS and custom stop tokens |
 | Platforms | macOS 14+, iOS 17+, Apple Silicon (arm64). Swift 6 language mode; developed with Swift 6.4 / Xcode 27 |
 
@@ -251,14 +258,14 @@ Regenerating the reference fixtures (PyTorch, `gguf`, `tokenizers`) is described
 
 ## Limitations
 
-- Llama-family decoders only: no RoPE scaling (Llama 3.1+), sliding-window attention, MoE, biases or partial rotary.
-- Tokenizer: byte-level BPE (`gpt2`, `smollm` pre-tokenizers). SentencePiece/Unigram models and the Llama-3 pre-tokenizer are rejected with an error.
-- Quantisation: F16, Q8_0, Q4_0 (Q4_1 via load-time expansion). K-quants, Q5_x and BF16 are rejected. Activations are not quantised (unlike llama.cpp), so outputs are not bit-comparable with it.
-- One sequence per generation; no continuous batching, paged attention or speculative decoding.
-- Prefill of very short prompts (≤ 24 tokens) is 10–28% slower than llama.cpp. The GPU-resident decode loop applies to greedy decoding only; stochastic sampling pays a CPU round trip per token (~15–20% slower).
+- Llama-family decoders only: no linear/YaRN RoPE scaling (Llama 3.x scaling is supported), sliding-window attention, MoE, biases or partial rotary. Qwen, Gemma and Phi are not supported.
+- Tokenizer: byte-level BPE (`gpt2`, `smollm`, `llama-bpe` pre-tokenizers). SentencePiece/Unigram models are rejected with an error. `--chat` uses the ChatML template only.
+- Quantisation: F16, BF16, Q8_0, Q5_0/1, Q4_0/1 and Q2_K–Q6_K are supported; IQ-quants are rejected. Activations are not quantised (unlike llama.cpp), so outputs are not bit-comparable with it.
+- One sequence per generation; no continuous batching or paged attention. Speculative decoding is prompt-lookup only (opt-in, greedy, small gain on the 135M model).
+- Prefill of very short prompts is slower than llama.cpp on larger models (Llama-3.2-1B Q4_K_M, 16 tokens: about 0.65–0.77×); on the 135M model it is now close. The GPU-resident decode loop applies to greedy decoding only; stochastic sampling pays a CPU round trip per token (~15–20% slower).
 - The fast prefill path (GEMM and attention on the matrix hardware) requires an Apple10-family GPU (M5/A19) and macOS/iOS 26; elsewhere the simdgroup-matrix paths run at roughly a third to a half of the throughput (measured on M5 only).
 - RoPE angles are float32 on the GPU (error ≈ 1e-7 × position radians). Models whose weights exceed `maxBufferLength` are loaded by copying.
-- Not measured: iPhone/iPad execution, energy and sustained-load thermal behaviour, models other than SmolLM2-135M.
+- Not measured: iPhone/iPad execution, energy and sustained-load thermal behaviour, models other than SmolLM2-135M and Llama-3.2-1B (the latter checked for correctness and spot speed only).
 
 ## Roadmap
 

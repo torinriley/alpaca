@@ -1,5 +1,7 @@
 # Performance
 
+> Newer work (K-quant decode, fused-dequant prefill, small-batch kernels, Llama-3.2-1B comparison) is described in [FEATURES.md](FEATURES.md). The measurements below are the original SmolLM2-135M study.
+
 *Author: Torin Etheridge · 2026-10-09 · MIT License*
 
 Hardware for every number in this file: **Apple M5 (10-core GPU, Apple10 family), 16 GB, macOS 27.0, Swift 6.4 release build**, model **SmolLM2-135M-Instruct** (F16 / Q8_0 / Q4_0 GGUF), Metal backend, greedy decoding, 64 generated tokens, 7 repetitions per cell after a warm-up. Only this machine was measured; nothing here was run on an iPhone or iPad.
