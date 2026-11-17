@@ -16,6 +16,12 @@ inline void mv_gen_impl(device const uchar* W, device const float* X, device flo
     if (n >= N) return;
     uint t0 = tg.y * TB;
     device const uchar* row = W + (ulong)n * fmt_row_bytes<FMT>(K);
+    if (TB == 1 && (FMT == FMT_Q4_K || FMT == FMT_Q6_K)) {
+        // Single token: dedicated K-quant loop (see kq_row_dot in common.metal).
+        float s = simd_sum(kq_row_dot<FMT, device const float*>(row, X, K, lane));
+        if (lane == 0) { device float* yp = Y + n; *yp = (acc_ ? *yp : 0.0f) + s; }
+        return;
+    }
     float acc[TB];
     for (uint t = 0; t < TB; t++) acc[t] = 0.0f;
     for (uint u = lane; u < K / 8; u += SIMD_WIDTH) {

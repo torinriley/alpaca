@@ -127,3 +127,59 @@ inline void dq8(device const uchar* row, uint u, thread float4& a, thread float4
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Q4_K / Q6_K single-row dot products for decode (one simdgroup per output row). 8 lanes cooperate on one 256-element super-block, so
+// four super-blocks are in flight per simdgroup; each lane owns 32 consecutive elements (one sub-block), decodes its scale once and loads
+// its packed bytes as vectors, instead of repeating the scale decode for every 8 elements as dq8 does. XP is the activation pointer type
+// (threadgroup for the fused kernels, device for the plain mat-vec).
+// ---------------------------------------------------------------------------------------------------------------------
+inline float4 xld4(threadgroup const float* p, uint i) { return *(threadgroup const float4*)(p + i * 4); }
+inline float4 xld4(device const float* p, uint i) { return *(device const float4*)(p + i * 4); }
+
+template <int FMT, typename XP>
+inline float kq_row_dot(device const uchar* row, XP xs, uint K, uint lane) {
+    float acc = 0.0f;
+    if (FMT == FMT_Q4_K) {
+        // 8 lanes per super-block, one 32-element sub-block each (scale decoded once, 32 packed bytes loaded as two 16-byte vectors):
+        // sum((d*sc*n - dmin*m) * x) = d*sc*sum(n*x) - dmin*m*sum(x). Four super-blocks are in flight per simdgroup.
+        const uint t = lane & 7, nsb = K >> 8;
+        const uint shift = (t & 1) * 4, c = t >> 1;
+        for (uint sb = lane >> 3; sb < nsb; sb += 4) {
+            device const uchar* p = row + (ulong)sb * 144;
+            const float d = ld_half(p), dmin = ld_half(p + 2);
+            const float2 smn = k4_scale_min(p + 4, t);
+            device const packed_uint4* q = (device const packed_uint4*)(p + 16 + c * 32);
+            XP xb = xs + sb * 256 + t * 32;
+            float s = 0.0f; float4 sx = float4(0.0f);
+            for (uint k = 0; k < 2; k++) {
+                uint4 w = uint4(q[k]);
+                for (uint e = 0; e < 4; e++) {
+                    float4 f = float4(as_type<uchar4>(w[e]) >> shift & 0x0F), xv = xld4(xb, k * 4 + e);
+                    s += dot(f, xv); sx += xv;
+                }
+            }
+            acc += d * smn.x * s - dmin * smn.y * (sx.x + sx.y + sx.z + sx.w);
+        }
+    } else {
+        // 8 lanes per super-block: (half, group) selects 32 elements = 32 ql bytes + 32 qh bytes and two int8 scales.
+        const uint t = lane & 7, nsb = K >> 8, h = t >> 2, g = t & 3;
+        const uint nshift = g >= 2 ? 4 : 0, hshift = 2 * g;
+        for (uint sb = lane >> 3; sb < nsb; sb += 4) {
+            device const uchar* p = row + (ulong)sb * 210;
+            const float d = ld_half(p + 208);
+            device const char* sc = (device const char*)(p + 192) + h * 8 + 2 * g;
+            device const packed_uchar4* ql = (device const packed_uchar4*)(p + h * 64 + (g & 1) * 32);
+            device const packed_uchar4* qh = (device const packed_uchar4*)(p + 128 + h * 32);
+            XP xb = xs + sb * 256 + h * 128 + g * 32;
+            float a0 = 0.0f, a1 = 0.0f;
+            for (uint k = 0; k < 8; k++) {
+                uchar4 lo = (uchar4(ql[k]) >> nshift) & 0x0F, hb = (uchar4(qh[k]) >> hshift) & 3;
+                float part = dot(float4(lo | (hb << 4)) - 32.0f, xld4(xb, k));
+                if (k < 4) a0 += part; else a1 += part;
+            }
+            acc += d * (float(sc[0]) * a0 + float(sc[1]) * a1);
+        }
+    }
+    return acc;
+}

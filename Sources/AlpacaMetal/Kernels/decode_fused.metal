@@ -61,6 +61,8 @@ inline float dec_row_dot(device const uchar* row, threadgroup const float* xs, u
             threadgroup const float4* xh = (threadgroup const float4*)(xs + b * Q_BLOCK + 16 + h * 8);
             acc += d * (dot(lo0, xl[0]) + dot(lo1, xl[1]) + dot(hi0, xh[0]) + dot(hi1, xh[1]));
         }
+    } else if (FMT == FMT_Q4_K || FMT == FMT_Q6_K) {
+        acc = kq_row_dot<FMT, threadgroup const float*>(row, xs, K, lane);
     } else {                                          // every other format: 8-element units through dq8
         threadgroup const float4* x4 = (threadgroup const float4*)xs;
         for (uint u = lane; u < K / 8; u += SIMD_WIDTH) {

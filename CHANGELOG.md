@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- **Faster K-quant decode:** dedicated Q4_K and Q6_K single-token loops (8 lanes per 256-element super-block, one scale decode per 32-element sub-block, vector loads, min/bias terms folded out of the inner loop), shared by the fused decode kernels and the plain mat-vec. Llama-3.2-1B Q4_K_M decode went from about 102 to about 127 tok/s on an M5, level with llama.cpp in interleaved runs; every decode stage is now near the machine's streaming bandwidth.
 - **Llama 3.x (3.1 / 3.2) support:** RoPE frequency scaling from `rope_freqs.weight`, the `llama-bpe` pre-tokenizer (digit groups, case-insensitive contractions, newline handling, whole-word lookup before merges, BOS by default), and per-operation fallback in single-token decode so a feed-forward width above 4096 no longer drops the whole layer off the fused path. Verified token-for-token against llama.cpp on Llama-3.2-1B-Instruct Q4_K_M, including a 3,499-token prompt (where the scaling matters). New `alpaca tokenize` command.
 - **More weight formats, all native on CPU and Metal:** Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K and BF16 (Q4_1 is no longer expanded to F16 at load). See [Docs/FORMATS.md](Docs/FORMATS.md).
 - **Faster short prompts:** a direct simdgroup-matrix kernel for 2–16 tokens replaces the mat-vec / tensor-op path there (16-token prefill about 1.3× faster on an M5; the tensor-op path now starts at 17 tokens).
