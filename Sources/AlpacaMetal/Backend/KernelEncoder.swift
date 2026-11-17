@@ -422,9 +422,9 @@ extension KernelEncoder {
     }
 }
 
-/// RoPE frequency table θ^(-2i/headDim), computed in double precision and rounded once to Float.
-func ropeFrequencies(headDim: Int, theta: Float) -> [Float] {
-    (0..<(headDim / 2)).map { Float(pow(Double(theta), -2.0 * Double($0) / Double(headDim))) }
+/// RoPE frequency table θ^(-2i/headDim) / factorᵢ, computed in double precision and rounded once to Float.
+func ropeFrequencies(headDim: Int, theta: Float, factors: [Float]? = nil) -> [Float] {
+    (0..<(headDim / 2)).map { Float(pow(Double(theta), -2.0 * Double($0) / Double(headDim)) / Double(factors?[$0] ?? 1)) }
 }
 
 /// Developer tuning knobs read once from the environment (used for kernel parameter sweeps; defaults are the shipped values).

@@ -77,3 +77,23 @@ final class TokenizerTests: XCTestCase {
         XCTAssertThrowsError(try BPETokenizer(tokens: [], merges: [], preTokenizer: "gpt2", bosTokenID: nil, eosTokenID: nil, addsBOSByDefault: false))
     }
 }
+
+/// Llama 3 ("llama-bpe") pre-tokenization, checked on a synthetic byte-level vocabulary (no model file needed).
+final class LlamaBPEPreTokenizerTests: XCTestCase {
+    func makeTokenizer(pre: String) throws -> BPETokenizer {
+        let tokens = (0..<256).map { String(ByteLevel.byteToScalar[UInt8($0)]!) }
+        return try BPETokenizer(tokens: tokens, merges: [], preTokenizer: pre, bosTokenID: nil, eosTokenID: nil, addsBOSByDefault: false)
+    }
+
+    func testDigitsInGroupsOfThreeContractionsAndNewlines() throws {
+        let t = try makeTokenizer(pre: "llama-bpe")
+        XCTAssertEqual(t.preTokenize("It's 12345 DON'T\n\nok"), ["It", "'s", " ", "123", "45", " DON", "'T", "\n\n", "ok"])
+        XCTAssertEqual(t.preTokenize("x=1.5;\n"), ["x", "=", "1", ".", "5", ";\n"])
+    }
+
+    func testGPT2PatternUnchanged() throws {
+        let t = try makeTokenizer(pre: "gpt2")
+        XCTAssertEqual(t.preTokenize("It's 12345"), ["It", "'s", " 12345"])
+        XCTAssertThrowsError(try makeTokenizer(pre: "no-such-pre-tokenizer"))
+    }
+}

@@ -18,11 +18,15 @@ public struct LlamaConfig: Sendable, Equatable {
     public var ropeTheta: Float
     /// true: rotate adjacent pairs (GGUF/llama.cpp weight layout). false: split halves (Hugging Face layout).
     public var ropeInterleaved: Bool
+    /// Per-pair divisors applied to the RoPE frequencies (`headDim / 2` values): angleᵢ = position · theta^(-2i/headDim) / factorᵢ.
+    /// Llama 3.1 / 3.2 ship their long-context ("llama3") scaling as this table (`rope_freqs.weight` in GGUF). nil = no scaling.
+    public var ropeFreqFactors: [Float]?
 
     public init(
         vocabSize: Int, hiddenSize: Int, layerCount: Int, headCount: Int, kvHeadCount: Int, headDim: Int? = nil,
-        feedForwardSize: Int, contextLength: Int, rmsNormEps: Float, ropeTheta: Float, ropeInterleaved: Bool = true
+        feedForwardSize: Int, contextLength: Int, rmsNormEps: Float, ropeTheta: Float, ropeInterleaved: Bool = true, ropeFreqFactors: [Float]? = nil
     ) {
+        self.ropeFreqFactors = ropeFreqFactors
         self.vocabSize = vocabSize; self.hiddenSize = hiddenSize; self.layerCount = layerCount
         self.headCount = headCount; self.kvHeadCount = kvHeadCount
         self.headDim = headDim ?? (headCount > 0 ? hiddenSize / headCount : 0)
@@ -40,6 +44,9 @@ public struct LlamaConfig: Sendable, Equatable {
             feedForwardSize > 0, contextLength > 0 else { throw fail("all dimensions must be positive: \(self)") }
         guard headCount % kvHeadCount == 0 else { throw fail("headCount \(headCount) is not a multiple of kvHeadCount \(kvHeadCount)") }
         guard headDim % 2 == 0 else { throw fail("RoPE needs an even headDim, got \(headDim)") }
+        if let f = ropeFreqFactors, f.count != headDim / 2 || f.contains(where: { !($0 > 0) || !$0.isFinite }) {
+            throw fail("ropeFreqFactors must hold \(headDim / 2) positive finite values")
+        }
         guard rmsNormEps > 0, ropeTheta > 0 else { throw fail("rmsNormEps and ropeTheta must be positive") }
         // Overflow guards for sizes derived from untrusted metadata.
         for (name, v) in [("vocabSize", vocabSize), ("hiddenSize", hiddenSize), ("feedForwardSize", feedForwardSize),

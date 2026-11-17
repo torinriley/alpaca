@@ -23,11 +23,14 @@ extension GGUFFile {
             return t
         }
         func id(_ key: String) -> Int32? { int(key).flatMap { Int32(exactly: $0) } }
+        let pre = string("tokenizer.ggml.pre") ?? "gpt2"
+        // Llama 3 files do not carry tokenizer.ggml.add_bos_token; llama.cpp prepends BOS for that vocabulary by default.
+        let defaultAddBOS = pre == "llama-bpe" || pre == "llama3"
         do {
             return try BPETokenizer(
-                tokens: tokens, merges: merges, tokenTypes: types, preTokenizer: string("tokenizer.ggml.pre") ?? "gpt2",
+                tokens: tokens, merges: merges, tokenTypes: types, preTokenizer: pre,
                 bosTokenID: id("tokenizer.ggml.bos_token_id"), eosTokenID: id("tokenizer.ggml.eos_token_id"),
-                addsBOSByDefault: metadata["tokenizer.ggml.add_bos_token"]?.asBool ?? false)
+                addsBOSByDefault: metadata["tokenizer.ggml.add_bos_token"]?.asBool ?? defaultAddBOS)
         } catch let e as TokenizerError {
             throw GGUFError.unsupportedModel("\(e)")
         }

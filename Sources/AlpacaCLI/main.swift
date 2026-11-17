@@ -216,9 +216,17 @@ func runBench(_ a: Args) async throws {
     }
 }
 
+/// alpaca tokenize <model.gguf> --prompt "…"   prints the token ids the model would see (BOS included when the model adds one).
+func runTokenize(_ a: Args) async throws {
+    guard let path = a.positional.dropFirst().first, let prompt = a.options["prompt"] else { throw CLIError(description: "usage: alpaca tokenize <model.gguf> --prompt \"…\"") }
+    var o = LoadOptions(); o.backend = .cpu; o.contextLength = 64
+    let model = try await LanguageModel.load(from: URL(fileURLWithPath: path), options: o)
+    print(try model.tokenize(prompt, addBeginningOfSequence: true).map(String.init).joined(separator: " "))
+}
+
 do {
     let argv = Array(CommandLine.arguments.dropFirst())
-    guard let cmd = argv.first else { throw CLIError(description: "usage: alpaca <info|generate|bench> <model.gguf> [options]") }
+    guard let cmd = argv.first else { throw CLIError(description: "usage: alpaca <info|generate|bench|profile|tokenize> <model.gguf> [options]") }
     let a = try Args(argv, valueOptions: ["prompt", "speculate", "max-tokens", "temperature", "top-k", "top-p", "seed", "backend", "context", "kv", "memory-budget-mb",
                                           "prompt-lengths", "decode", "runs", "context-sweep", "json", "tokens", "context-before", "prefill-batch"])
     switch cmd {
@@ -226,6 +234,7 @@ do {
     case "generate": try await runGenerate(a)
     case "bench": try await runBench(a)
     case "profile": try await runProfile(a)
+    case "tokenize": try await runTokenize(a)
     default: throw CLIError(description: "unknown command '\(cmd)'")
     }
 } catch {

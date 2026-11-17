@@ -21,10 +21,10 @@ Files validated: `SmolLM2-135M-Instruct-{f16,Q8_0,Q4_0}.gguf`. The Q4_0 file mix
 
 ## Contract for other models
 
-Accepted: `general.architecture == "llama"`; head count, KV head count, embedding/FFN/block/context lengths present; head dim = `attention.key_length` or hidden/heads, even, multiple of 32 and ≤ 256 on Metal; `rope.dimension_count` (if present) equal to head dim; no `rope.scaling.type` (other than `none`); no experts; norm tensors F32; projection/embedding tensors F32 (CPU only), F16, BF16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K (all read in place from the mapping); projection input width a multiple of the format's block size (32 for the legacy formats, 256 for K-quants — llama.cpp already stores narrower tensors in a legacy type) / 8 (F16, BF16).
-Rejected with an explicit error (never silently reinterpreted): other architectures, RoPE scaling (e.g. Llama 3.1), IQ-quants (IQ1–IQ4), MoE, SentencePiece/Unigram tokenizers, tokenizers with other pre-tokenizers (e.g. Llama-3), big-endian files, GGUF v1.
+Accepted: `general.architecture == "llama"`; head count, KV head count, embedding/FFN/block/context lengths present; head dim = `attention.key_length` or hidden/heads, even, multiple of 32 and ≤ 256 on Metal; `rope.dimension_count` (if present) equal to head dim; no `rope.scaling.type` (other than `none`; Llama 3.1 / 3.2 "llama3" scaling is applied from the `rope_freqs.weight` tensor); no experts; norm tensors F32; projection/embedding tensors F32 (CPU only), F16, BF16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K (all read in place from the mapping); projection input width a multiple of the format's block size (32 for the legacy formats, 256 for K-quants — llama.cpp already stores narrower tensors in a legacy type) / 8 (F16, BF16).
+Rejected with an explicit error (never silently reinterpreted): other architectures, linear / YaRN RoPE scaling, IQ-quants (IQ1–IQ4), MoE, SentencePiece/Unigram tokenizers, tokenizers with other pre-tokenizers (supported: gpt2, smollm, llama-bpe), big-endian files, GGUF v1.
 
-Other models of the same shape (e.g. Llama-3.2-1B uses RoPE scaling and a different pre-tokenizer → *not* supported yet) have **not** been tested.
+Also validated: `Llama-3.2-1B-Instruct-Q4_K_M.gguf` (Llama 3.x RoPE scaling, `llama-bpe` tokenizer, K-quants at full width): greedy output identical to llama.cpp for short prompts and a 3,499-token prompt, and token ids identical on a 12-string battery (Unicode, code, digits, newlines, special tokens). Other models of the same shape have **not** been tested.
 
 ## Memory model (SmolLM2-135M)
 

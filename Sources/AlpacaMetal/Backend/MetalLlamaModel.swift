@@ -88,7 +88,7 @@ public final class MetalLlamaModel: @unchecked Sendable {
         }
         layers = built
         prefillCacheBytes = cacheBytes
-        let freqs = ropeFrequencies(headDim: config.headDim, theta: config.ropeTheta)
+        let freqs = ropeFrequencies(headDim: config.headDim, theta: config.ropeTheta, factors: config.ropeFreqFactors)
         ropeFreqs = try context.makeBuffer(copying: freqs, length: freqs.count * 4)
         zeroCopyWeightBytes = zeroCopy; copiedWeightBytes = copied
     }
@@ -372,25 +372,44 @@ public final class MetalLlamaSession: @unchecked Sendable {
                 try p.stage("ffn down (+residual)").projectHalf(l.wDown, xHalf: gateH, y: x, tokens: n, accumulate: true)
                 continue
             }
-            if [l.wq, l.wk, l.wv, l.wo, l.wGate, l.wUp, l.wDown].allSatisfy({ KernelEncoder.canFuseDecode([$0], tokens: n) }) {
+            if n == 1 && KernelEncoder.fusedDecodeEnabled {
                 // Single-token path: 6 dispatches per layer instead of 13 (norms, residuals, SiLU and RoPE folded into neighbours;
-                // a few more when a file mixes quantisation types within a layer).
-                p.stage("qkv (fused norm)").decodeQKV(l.wq, l.wk, l.wv, x: x, norm: (l.attnNorm, c.rmsNormEps), q: q, k: k, v: v)
+                // a few more when a file mixes quantisation types within a layer). Each operation falls back to the plain kernels on its
+                // own when it cannot fuse (e.g. a feed-forward width above 4096, whose input row does not fit threadgroup memory).
+                func fuses(_ m: [GPUMatrix]) -> Bool { m.allSatisfy { KernelEncoder.canFuseDecode([$0], tokens: 1) } }
+                if fuses([l.wq, l.wk, l.wv]) {
+                    p.stage("qkv (fused norm)").decodeQKV(l.wq, l.wk, l.wv, x: x, norm: (l.attnNorm, c.rmsNormEps), q: q, k: k, v: v)
+                } else {
+                    try p.stage("rmsnorm").rmsNorm(x, weight: l.attnNorm.buffer, weightOffset: l.attnNorm.offset, out: xn, rows: 1, dim: h, eps: c.rmsNormEps)
+                    let qkv = p.stage("qkv projections")
+                    try qkv.linear(l.wq, x: xn, y: q, tokens: 1); try qkv.linear(l.wk, x: xn, y: k, tokens: 1); try qkv.linear(l.wv, x: xn, y: v, tokens: 1)
+                }
                 try p.stage("rope + kv store").ropeQKVStore(q: q, k: k, v: v, kCache: kCache[i], vCache: vCache[i], freqs: model.ropeFreqs,
                                                             heads: c.headCount, kvHeads: c.kvHeadCount, headDim: c.headDim,
                                                             startPosition: startPosition, tokens: 1, kv: kvPrecision)
                 try p.stage("attention").attention(q: q, kCache: kCache[i], vCache: vCache[i], out: ctx, heads: c.headCount, kvHeads: c.kvHeadCount,
                                                    headDim: c.headDim, startPosition: startPosition, tokens: 1, kv: kvPrecision, decodeScratch: decodeScratch)
-                p.stage("attn out projection (+residual)").decodeProjection(l.wo, x: ctx, out: x, add: true)
-                if l.wGate.dtype == l.wUp.dtype {
-                    p.stage("ffn gate+up+silu (fused norm)").decodeGateUp(l.wGate, l.wUp, x: x, norm: (l.ffnNorm, c.rmsNormEps), out: gate)
+                if fuses([l.wo]) {
+                    p.stage("attn out projection (+residual)").decodeProjection(l.wo, x: ctx, out: x, add: true)
                 } else {
+                    try p.stage("attn out projection (+residual)").linearAdd(l.wo, x: ctx, residual: x, tokens: 1)
+                }
+                if fuses([l.wGate, l.wUp]) && l.wGate.dtype == l.wUp.dtype {
+                    p.stage("ffn gate+up+silu (fused norm)").decodeGateUp(l.wGate, l.wUp, x: x, norm: (l.ffnNorm, c.rmsNormEps), out: gate)
+                } else if fuses([l.wGate, l.wUp]) {
                     let gu = p.stage("ffn gate+up+silu (fused norm)")
                     gu.decodeProjection(l.wGate, x: x, norm: (l.ffnNorm, c.rmsNormEps), out: gate)
                     gu.decodeProjection(l.wUp, x: x, norm: (l.ffnNorm, c.rmsNormEps), out: up)
                     try gu.siluMul(gate: gate, up: up, out: gate, count: c.feedForwardSize)
+                } else {
+                    try p.stage("rmsnorm").rmsNorm(x, weight: l.ffnNorm.buffer, weightOffset: l.ffnNorm.offset, out: xn, rows: 1, dim: h, eps: c.rmsNormEps)
+                    try p.stage("ffn gate+up+silu").gateUpSilu(l.wGate, l.wUp, x: xn, out: gate, scratchUp: up, tokens: 1)
                 }
-                p.stage("ffn down (+residual)").decodeProjection(l.wDown, x: gate, out: x, add: true)
+                if fuses([l.wDown]) {
+                    p.stage("ffn down (+residual)").decodeProjection(l.wDown, x: gate, out: x, add: true)
+                } else {
+                    try p.stage("ffn down (+residual)").linearAdd(l.wDown, x: gate, residual: x, tokens: 1)
+                }
                 continue
             }
             try p.stage("rmsnorm").rmsNorm(x, weight: l.attnNorm.buffer, weightOffset: l.attnNorm.offset, out: xn, rows: n, dim: h, eps: c.rmsNormEps)

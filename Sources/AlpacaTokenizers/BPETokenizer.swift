@@ -10,7 +10,7 @@ public enum TokenizerError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .invalidVocabulary(let m): return "invalid tokenizer vocabulary: \(m)"
-        case .unsupportedPreTokenizer(let p): return "unsupported pre-tokenizer '\(p)' (supported: gpt2, smollm)"
+        case .unsupportedPreTokenizer(let p): return "unsupported pre-tokenizer '\(p)' (supported: gpt2, smollm, llama-bpe)"
         case .unknownTokenID(let id): return "token id \(id) is outside the vocabulary"
         }
     }
@@ -36,6 +36,8 @@ public final class BPETokenizer: @unchecked Sendable {
     private let mergeRanks: [MergeKey: Int]
     private let specialTokens: [(text: String, id: Int32)]   // longest first
     private let isolateDigits: Bool
+    /// Llama 3 / tiktoken behaviour: a pre-token that is itself a vocabulary entry is used as one token without applying merges.
+    private let ignoreMerges: Bool
     private let wordRegex: NSRegularExpression
     private let cacheLock = NSLock()
     nonisolated(unsafe) private var wordCache: [String: [Int32]] = [:]
@@ -48,15 +50,22 @@ public final class BPETokenizer: @unchecked Sendable {
     /// GPT-2 contraction / word / number / punctuation / whitespace pre-tokenization regex.
     static let gpt2Pattern = #"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"#
 
+    /// Llama 3 / tiktoken-style pre-tokenization: case-insensitive contractions, optional leading non-letter before a word, digits in groups of up
+    /// to three, punctuation runs absorbing trailing newlines, and newline-aware whitespace handling.
+    static let llamaBPEPattern = #"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"#
+
     public init(
         tokens: [String], merges: [String], tokenTypes: [Int32]? = nil, preTokenizer: String,
         bosTokenID: Int32?, eosTokenID: Int32?, addsBOSByDefault: Bool
     ) throws {
         guard !tokens.isEmpty, tokens.count < Int(Int32.max) else { throw TokenizerError.invalidVocabulary("empty or oversized vocabulary") }
         if let t = tokenTypes, t.count != tokens.count { throw TokenizerError.invalidVocabulary("token_type count \(t.count) != token count \(tokens.count)") }
+        var pattern = Self.gpt2Pattern
+        ignoreMerges = preTokenizer == "llama-bpe" || preTokenizer == "llama3"
         switch preTokenizer {
         case "gpt2": isolateDigits = false
         case "smollm": isolateDigits = true
+        case "llama-bpe", "llama3": isolateDigits = false; pattern = Self.llamaBPEPattern
         default: throw TokenizerError.unsupportedPreTokenizer(preTokenizer)
         }
         for id in [bosTokenID, eosTokenID].compactMap({ $0 }) where id < 0 || Int(id) >= tokens.count {
@@ -85,7 +94,7 @@ public final class BPETokenizer: @unchecked Sendable {
         specialTokens = specials.sorted { $0.0.utf8.count > $1.0.utf8.count }.map { (text: $0.0, id: $0.1) }
         vocabularySize = tokens.count
         self.bosTokenID = bosTokenID; self.eosTokenID = eosTokenID; self.addsBOSByDefault = addsBOSByDefault
-        wordRegex = try NSRegularExpression(pattern: Self.gpt2Pattern)
+        wordRegex = try NSRegularExpression(pattern: pattern)
     }
 
     // MARK: Encode
@@ -166,6 +175,10 @@ public final class BPETokenizer: @unchecked Sendable {
         cacheLock.unlock()
 
         var symbols: [String] = word.utf8.map { String(ByteLevel.byteToScalar[$0]!) }
+        if ignoreMerges, symbols.count > 1, let id = tokenToID[symbols.joined()] {
+            cacheLock.lock(); wordCache[word] = [id]; cacheLock.unlock()
+            return [id]
+        }
         while symbols.count > 1 {
             var bestRank = Int.max, bestIndex = -1
             for i in 0..<(symbols.count - 1) {

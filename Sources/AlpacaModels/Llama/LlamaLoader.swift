@@ -26,7 +26,7 @@ public struct LoadedLlama: Sendable {
 /// Supported on-disk tensor types, all used in place from the mapping (no conversion, no copy): F32 (norms), F16, BF16,
 /// Q8_0, Q5_0, Q5_1, Q4_0, Q4_1 and the K-quants Q2_K, Q3_K, Q4_K, Q5_K, Q6_K. Anything else (e.g. IQ-quants) is rejected with
 /// `GGUFError.unsupportedTensorType`.
-/// RoPE: GGUF Llama weights use the interleaved (adjacent-pair) layout; rope scaling is not implemented and is rejected.
+/// RoPE: GGUF Llama weights use the interleaved (adjacent-pair) layout; Llama 3.x frequency scaling is applied from `rope_freqs.weight`, other scaling types are rejected.
 public enum LlamaLoader {
     public static func load(url: URL) throws -> LoadedLlama {
         try load(file: GGUFFile(url: url))
@@ -51,7 +51,15 @@ public enum LlamaLoader {
             throw GGUFError.unsupportedModel("partial rotary embedding (rope dimension_count \(rd) != head dim \(headDim)) is not supported")
         }
         if let s = file.string("llama.rope.scaling.type"), s != "none" {
-            throw GGUFError.unsupportedModel("RoPE scaling '\(s)' is not supported")
+            throw GGUFError.unsupportedModel("RoPE scaling '\(s)' is not supported (Llama 3.x scaling is read from the rope_freqs.weight tensor)")
+        }
+        // Llama 3.1 / 3.2 "llama3" scaling: the converter bakes it into a per-pair factor table (rope_freqs.weight); angle = pos · θᵢ / factorᵢ.
+        var freqFactors: [Float]?
+        if let info = file.info(for: "rope_freqs.weight") {
+            guard info.type == .f32, info.elementCount == headDim / 2 else {
+                throw GGUFError.unsupportedModel("rope_freqs.weight must be \(headDim / 2) F32 values, found \(info.elementCount) \(info.type)")
+            }
+            freqFactors = try file.tensor(named: "rope_freqs.weight").toFloatArray()
         }
         if file.metadata["llama.expert_count"] != nil, (file.int("llama.expert_count") ?? 0) > 0 {
             throw GGUFError.unsupportedModel("mixture-of-experts models are not supported")
@@ -64,7 +72,7 @@ public enum LlamaLoader {
             headCount: heads, kvHeadCount: file.int("llama.attention.head_count_kv") ?? heads, headDim: headDim,
             feedForwardSize: try req("llama.feed_forward_length"), contextLength: try req("llama.context_length"),
             rmsNormEps: Float(file.double("llama.attention.layer_norm_rms_epsilon") ?? 1e-5),
-            ropeTheta: Float(file.double("llama.rope.freq_base") ?? 10000), ropeInterleaved: true)
+            ropeTheta: Float(file.double("llama.rope.freq_base") ?? 10000), ropeInterleaved: true, ropeFreqFactors: freqFactors)
         do { try config.validate() } catch { throw GGUFError.unsupportedModel("\(error)") }
 
         var report = LoadReport()

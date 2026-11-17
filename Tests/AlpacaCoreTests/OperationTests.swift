@@ -69,6 +69,23 @@ final class OperationTests: XCTestCase {
         try assertClose(CPUOps.rope(x, startPosition: c.int("start"), theta: theta, interleaved: false), c.doubles("expected_split"), atol: 2e-6, "rope split-half")
     }
 
+    func testRoPEFrequencyFactors() throws {
+        // Pair i rotates by position * theta^(-2i/headDim) / factor_i (Llama 3.x scaling table); factor 1 reproduces the unscaled result.
+        let x = try Tensor([1, 0, 1, 0], shape: [1, 1, 4])
+        let factors: [Float] = [1, 8]
+        let out = try CPUOps.rope(x, startPosition: 5, theta: 500000, interleaved: true, freqFactors: factors).toFloatArray()
+        for i in 0..<2 {
+            let angle = 5.0 * pow(500000.0, -2.0 * Double(i) / 4.0) / Double(factors[i])
+            XCTAssertEqual(Double(out[2 * i]), cos(angle), accuracy: 1e-6)
+            XCTAssertEqual(Double(out[2 * i + 1]), sin(angle), accuracy: 1e-6)
+        }
+        let plain = try CPUOps.rope(x, startPosition: 5, theta: 500000).toFloatArray()
+        let ones = try CPUOps.rope(x, startPosition: 5, theta: 500000, freqFactors: [1, 1]).toFloatArray()
+        XCTAssertEqual(plain, ones)
+        XCTAssertNotEqual(plain[2], out[2])
+        XCTAssertThrowsError(try CPUOps.rope(x, startPosition: 0, theta: 1e4, freqFactors: [1]))
+    }
+
     func testCausalGQAAttention() throws {
         let c = try ops.dict("attention")
         let (t, h, kv, hd, cap) = (c.int("tokens"), c.int("heads"), c.int("kvHeads"), c.int("headDim"), c.int("capacity"))

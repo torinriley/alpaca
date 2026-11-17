@@ -190,17 +190,18 @@ public enum CPUOps {
 
     /// Rotary position embedding on x[tokens, heads, headDim], token t at absolute position `startPosition + t`.
     ///
-    /// For pair index i in 0..<headDim/2: θᵢ = theta^(-2i/headDim), angle = position·θᵢ.
+    /// For pair index i in 0..<headDim/2: θᵢ = theta^(-2i/headDim) / factorᵢ (factor 1 when `freqFactors` is nil), angle = position·θᵢ.
     /// `interleaved == true` rotates adjacent pairs (x[2i], x[2i+1]) — the layout GGUF Llama files use.
     /// `interleaved == false` rotates split halves (x[i], x[i+headDim/2]) — the Hugging Face "rotate_half" layout.
     public static func rope(
-        _ x: Tensor, startPosition: Int, theta: Float, interleaved: Bool = true
+        _ x: Tensor, startPosition: Int, theta: Float, interleaved: Bool = true, freqFactors: [Float]? = nil
     ) throws -> Tensor {
         try requireF32(x, name: "rope")
         guard x.rank == 3, x.shape[2] % 2 == 0, x.shape[2] > 0 else {
             throw TensorError.shapeMismatch("rope expects [tokens, heads, even headDim], got \(x.shape)")
         }
         guard startPosition >= 0, theta > 0 else { throw TensorError.invalidShape("rope: startPosition \(startPosition), theta \(theta)") }
+        if let f = freqFactors, f.count != x.shape[2] / 2 { throw TensorError.shapeMismatch("rope: \(f.count) frequency factors for head dim \(x.shape[2])") }
         let (tokens, heads, hd) = (x.shape[0], x.shape[1], x.shape[2])
         var v = try x.toFloatArray()
         let half = hd / 2
@@ -208,7 +209,7 @@ public enum CPUOps {
             let pos = Double(startPosition + t)
             for i in 0..<half {
                 // Frequencies and angles in Double, rounded once to Float: removes trig range-reduction noise from the reference.
-                let freq = pow(Double(theta), -2.0 * Double(i) / Double(hd))
+                let freq = pow(Double(theta), -2.0 * Double(i) / Double(hd)) / Double(freqFactors?[i] ?? 1)
                 let angle = pos * freq
                 let c = Float(cos(angle)), s = Float(sin(angle))
                 for h in 0..<heads {
