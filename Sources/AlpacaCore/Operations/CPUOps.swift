@@ -134,6 +134,18 @@ public enum CPUOps {
                 }
                 acc += d * s
             }
+        case .bfloat16:
+            let w = row.assumingMemoryBound(to: UInt16.self)
+            for i in 0..<k { acc += Float(bitPattern: UInt32(w[i]) << 16) * x[i] }
+        case .q4_1, .q5_0, .q5_1, .q2_K, .q3_K, .q4_K, .q5_K, .q6_K:
+            // Reference path: dequantise one block at a time, then accumulate in Float32.
+            let n = dtype.blockElements
+            withUnsafeTemporaryAllocation(of: Float.self, capacity: n) { tmp in
+                for b in 0..<(k / n) {
+                    dequantizeBlock(dtype, row + b * dtype.blockBytes, into: tmp.baseAddress!)
+                    for j in 0..<n { acc += tmp[j] * x[b * n + j] }
+                }
+            }
         }
         return acc
     }

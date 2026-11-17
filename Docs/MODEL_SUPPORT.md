@@ -21,8 +21,8 @@ Files validated: `SmolLM2-135M-Instruct-{f16,Q8_0,Q4_0}.gguf`. The Q4_0 file mix
 
 ## Contract for other models
 
-Accepted: `general.architecture == "llama"`; head count, KV head count, embedding/FFN/block/context lengths present; head dim = `attention.key_length` or hidden/heads, even, multiple of 32 and ≤ 256 on Metal; `rope.dimension_count` (if present) equal to head dim; no `rope.scaling.type` (other than `none`); no experts; norm tensors F32; projection/embedding tensors F32 (CPU only), F16, Q8_0, Q4_0 (or Q4_1, expanded); projection input width a multiple of 32 (quantised) / 8 (F16).
-Rejected with an explicit error (never silently reinterpreted): other architectures, RoPE scaling (e.g. Llama 3.1), K-quants, Q5_x, BF16, MoE, SentencePiece/Unigram tokenizers, tokenizers with other pre-tokenizers (e.g. Llama-3), big-endian files, GGUF v1.
+Accepted: `general.architecture == "llama"`; head count, KV head count, embedding/FFN/block/context lengths present; head dim = `attention.key_length` or hidden/heads, even, multiple of 32 and ≤ 256 on Metal; `rope.dimension_count` (if present) equal to head dim; no `rope.scaling.type` (other than `none`); no experts; norm tensors F32; projection/embedding tensors F32 (CPU only), F16, BF16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K (all read in place from the mapping); projection input width a multiple of the format's block size (32 for the legacy formats, 256 for K-quants — llama.cpp already stores narrower tensors in a legacy type) / 8 (F16, BF16).
+Rejected with an explicit error (never silently reinterpreted): other architectures, RoPE scaling (e.g. Llama 3.1), IQ-quants (IQ1–IQ4), MoE, SentencePiece/Unigram tokenizers, tokenizers with other pre-tokenizers (e.g. Llama-3), big-endian files, GGUF v1.
 
 Other models of the same shape (e.g. Llama-3.2-1B uses RoPE scaling and a different pre-tokenizer → *not* supported yet) have **not** been tested.
 
@@ -30,7 +30,7 @@ Other models of the same shape (e.g. Llama-3.2-1B uses RoPE scaling and a differ
 
 | item | F16 | Q8_0 | Q4_0 |
 |---|---|---|---|
-| file = mapped weights | 271 MB | 145 MB | 92 MB (+5 MB converted Q4_1→F16 copy) |
+| file = mapped weights | 271 MB | 145 MB | 92 MB |
 | KV cache @ 4096 ctx, f16 / f32 | 90 / 181 MiB | same | same |
 | scratch (prefill batch 128) | ~3 MiB | same | same |
 | runtime allowance | 96 MiB | same | same |

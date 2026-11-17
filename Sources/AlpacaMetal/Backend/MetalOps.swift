@@ -110,7 +110,7 @@ public final class MetalOps: @unchecked Sendable {
         guard x.rank == 2, w.rank == 2, x.shape[1] == w.shape[1] else { throw MetalError.invalidArgument("linear shapes \(x.shape) / \(w.shape)") }
         guard w.dtype != .float32, w.isContiguous else { throw MetalError.unsupported("weight dtype \(w.dtype)") }
         let (m, k, n) = (x.shape[0], x.shape[1], w.shape[0])
-        guard k % (w.dtype.isQuantized ? 32 : 8) == 0 else { throw MetalError.invalidArgument("K=\(k) not a multiple of the kernel unit") }
+        guard k % (w.dtype.isQuantized ? w.dtype.blockElements : 8) == 0 else { throw MetalError.invalidArgument("K=\(k) not a multiple of the kernel unit") }
         let out = try context.makeBuffer(length: m * n * 4)
         let bx = try buffer(x), bw = try buffer(w)
         let gw = GPUMatrix(buffer: bw, offset: 0, dtype: w.dtype, rows: n, cols: k)

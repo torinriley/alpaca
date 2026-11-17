@@ -51,10 +51,15 @@ public struct GenerationConfiguration: Sendable {
     public var parseSpecialTokens: Bool
     /// Prepend BOS if the model's metadata asks for it.
     public var addBeginningOfSequence: Bool
+    /// Greedy decoding only (Metal): propose up to this many tokens by matching the recent n-gram against the prompt and
+    /// output so far, and verify them in one batched pass (prompt-lookup speculation). 0 disables it; at most 7.
+    /// Speeds up repetitive output (code, summaries, quoting the prompt); costs a little otherwise.
+    public var lookupDraftTokens: Int
 
     public init(maxTokens: Int = 256, temperature: Float = 0.8, topK: Int = 0, topP: Float = 1, seed: UInt64? = nil,
                 stopOnEndOfSequence: Bool = true, stopTokens: Set<Int32> = [], parseSpecialTokens: Bool = true,
-                addBeginningOfSequence: Bool = true) {
+                addBeginningOfSequence: Bool = true, lookupDraftTokens: Int = 0) {
+        self.lookupDraftTokens = lookupDraftTokens
         self.maxTokens = maxTokens; self.temperature = temperature; self.topK = topK; self.topP = topP; self.seed = seed
         self.stopOnEndOfSequence = stopOnEndOfSequence; self.stopTokens = stopTokens
         self.parseSpecialTokens = parseSpecialTokens; self.addBeginningOfSequence = addBeginningOfSequence

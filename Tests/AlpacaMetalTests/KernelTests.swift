@@ -51,7 +51,7 @@ final class KernelTests: XCTestCase {
 
     func testLinearAllFormatsAndBatchSizes() throws {
         // N not a multiple of 4 (threadgroup rows), T not a multiple of 8 (token block): exercises both edge guards.
-        for (k, n) in [(64, 10), (576, 193), (1536, 576)] {
+        for (k, n) in [(64, 10), (576, 193), (576, 192), (1536, 576)] {
             let w32 = try rand([n, k], seed: 5, scale: 0.3)
             let q8 = try quantize(w32.toFloatArray(), to: .q8_0).reshaped([n, k])
             let q4 = try quantize(w32.toFloatArray(), to: .q4_0).reshaped([n, k])
@@ -84,6 +84,66 @@ final class KernelTests: XCTestCase {
             let cpu32 = try CPUOps.attentionApply(probs: CPUOps.softmax(CPUOps.attentionScores(q: q, keys: k, length: start + tokens, startPosition: start)), values: v)
             try compare(ops.attention(q: q, keys: k, values: v, startPosition: start, kv: .float32), cpu32, atol: 2e-6, rtol: 1e-5,
                         "attention f32-KV T=\(tokens) start=\(start) H=\(heads)/\(kv) hd=\(hd)")
+        }
+    }
+
+    // MARK: - Additional weight formats (Q4_1, Q5_0, Q5_1, Q2_K ... Q6_K, BF16)
+
+    /// Random but well-formed blocks: random payload bytes, with every half-precision scale/min field set to a small finite value.
+    func randomBlocks(_ dtype: DType, shape: [Int], seed: UInt64) throws -> Tensor {
+        let n = shape.reduce(1, *)
+        let storage = try TensorStorage(byteCount: n / dtype.blockElements * dtype.blockBytes)
+        var g = SplitMix(seed: seed)
+        let halfOffsets: [DType: [Int]] = [.q4_1: [0, 2], .q5_0: [0], .q5_1: [0, 2], .q2_K: [80, 82], .q3_K: [108], .q4_K: [0, 2], .q5_K: [0, 2], .q6_K: [208]]
+        for i in 0..<(storage.byteCount) { storage.pointer.storeBytes(of: UInt8(truncatingIfNeeded: g.next()), toByteOffset: i, as: UInt8.self) }
+        for b in 0..<(n / dtype.blockElements) {
+            for o in halfOffsets[dtype] ?? [] {
+                let v = Float16(0.002 + 0.002 * (g.nextFloat() + 1) / 2)
+                (storage.pointer + b * dtype.blockBytes + o).storeBytes(of: v, as: Float16.self)
+            }
+        }
+        if dtype == .bfloat16 {        // keep values in a sane range: bfloat16 of N(0, 0.3)
+            for i in 0..<n {
+                let bits = UInt16(truncatingIfNeeded: Float(0.3 * g.nextFloat()).bitPattern >> 16)
+                (storage.pointer + i * 2).storeBytes(of: bits, as: UInt16.self)
+            }
+        }
+        return try Tensor(storage: storage, dtype: dtype, shape: shape)
+    }
+
+    static let newFormats: [DType] = [.q4_1, .q5_0, .q5_1, .q2_K, .q3_K, .q4_K, .q5_K, .q6_K, .bfloat16]
+
+    func testLinearNewFormatsAllKernelPaths() throws {
+        // K = 512 / 1536 are whole numbers of 256-element super-blocks; N = 192 / 576 use the small-batch kernel (N % 8 == 0).
+        for dtype in Self.newFormats {
+            for (k, n) in [(512, 192), (1536, 576), (512, 37)] {
+                let w = try randomBlocks(dtype, shape: [n, k], seed: 100 + UInt64(k + n))
+                for t in [1, 3, 8, 11, 33] {
+                    let x = try rand([t, k], seed: 7 + UInt64(t))
+                    try compare(ops.linear(x, weight: w), CPUOps.linear(x, weight: w), atol: 5e-4, rtol: 2e-4, "linear \(dtype) K=\(k) N=\(n) T=\(t)")
+                }
+            }
+        }
+    }
+
+    func testEmbeddingNewFormats() throws {
+        for dtype in Self.newFormats {
+            let table = try randomBlocks(dtype, shape: [50, 512], seed: 31)
+            let tokens: [Int32] = [0, 49, 7, 7]
+            try compare(ops.embed(tokens: tokens, table: table), CPUOps.embed(tokens: tokens, table: table), atol: 1e-6, rtol: 1e-6, "embed \(dtype)")
+        }
+    }
+
+    func testFastGEMMNewFormats() throws {
+        // Tensor-op path (M5 and later): the weight is expanded to half first, so allow half rounding of d*q (2^-11 relative per weight).
+        try XCTSkipUnless(ops.context.supportsTensorGEMM, "no tensor-op GEMM on this device")
+        for dtype in Self.newFormats where dtype.isQuantized {
+            let w = try randomBlocks(dtype, shape: [192, 512], seed: 55)
+            let x = try rand([48, 512], seed: 56)
+            let exact = try CPUOps.linear(x, weight: w).toFloatArray(), fast = try ops.linear(x, weight: w, precision: .fast).toFloatArray()
+            let m = ErrorMetrics(actual: fast, expected: exact.map(Double.init))
+            print("[metrics] fast GEMM \(dtype): \(m)")
+            for (a, e) in zip(fast, exact) where abs(Double(a) - Double(e)) > 0.05 + 5e-3 * abs(Double(e)) { return XCTFail("\(dtype): fast \(a) vs exact \(e)") }
         }
     }
 

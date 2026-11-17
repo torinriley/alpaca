@@ -14,12 +14,23 @@ public enum DType: Sendable, Hashable, CustomStringConvertible {
     /// Byte j holds element j in its low nibble and element j+16 in its high nibble;
     /// value = d * (nibble - 8). 18 bytes/block.
     case q4_0
+    /// GGUF Q4_1 (32 elements, 20 B: half d, half m, 16 nibble bytes laid out like Q4_0): value = d * nibble + m.
+    case q4_1
+    /// GGUF Q5_0 (32 elements, 22 B: half d, uint32 qh, 16 nibble bytes): value = d * (5-bit - 16).
+    case q5_0
+    /// GGUF Q5_1 (32 elements, 24 B: half d, half m, uint32 qh, 16 nibble bytes): value = d * 5-bit + m.
+    case q5_1
+    /// GGUF K-quants: 256-element super-blocks (see `Docs/FORMATS.md` for the byte layouts).
+    case q2_K, q3_K, q4_K, q5_K, q6_K
+    /// bfloat16 (element-addressable, 2 bytes).
+    case bfloat16
 
     /// Number of logical elements per storage block.
     public var blockElements: Int {
         switch self {
-        case .float32, .float16: return 1
-        case .q8_0, .q4_0: return quantBlockElements
+        case .float32, .float16, .bfloat16: return 1
+        case .q8_0, .q4_0, .q4_1, .q5_0, .q5_1: return quantBlockElements
+        case .q2_K, .q3_K, .q4_K, .q5_K, .q6_K: return kQuantBlockElements
         }
     }
 
@@ -27,9 +38,17 @@ public enum DType: Sendable, Hashable, CustomStringConvertible {
     public var blockBytes: Int {
         switch self {
         case .float32: return 4
-        case .float16: return 2
+        case .float16, .bfloat16: return 2
         case .q8_0: return 34
         case .q4_0: return 18
+        case .q4_1: return 20
+        case .q5_0: return 22
+        case .q5_1: return 24
+        case .q2_K: return 84
+        case .q3_K: return 110
+        case .q4_K: return 144
+        case .q5_K: return 176
+        case .q6_K: return 210
         }
     }
 
@@ -41,6 +60,15 @@ public enum DType: Sendable, Hashable, CustomStringConvertible {
         case .float16: return "f16"
         case .q8_0: return "q8_0"
         case .q4_0: return "q4_0"
+        case .q4_1: return "q4_1"
+        case .q5_0: return "q5_0"
+        case .q5_1: return "q5_1"
+        case .q2_K: return "q2_k"
+        case .q3_K: return "q3_k"
+        case .q4_K: return "q4_k"
+        case .q5_K: return "q5_k"
+        case .q6_K: return "q6_k"
+        case .bfloat16: return "bf16"
         }
     }
 
@@ -54,3 +82,5 @@ public enum DType: Sendable, Hashable, CustomStringConvertible {
 
 /// Elements per GGUF Q8_0 / Q4_0 block (QK8_0 / QK4_0).
 public let quantBlockElements = 32
+/// Elements per GGUF K-quant super-block (QK_K).
+public let kQuantBlockElements = 256

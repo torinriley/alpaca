@@ -59,9 +59,13 @@ struct KernelEncoder {
     /// Tokens handled per threadgroup row in the prefill mat-vec variant.
     static let prefillTokenBlock = 8
     /// Batches at least this large use the tiled simdgroup-matrix GEMM instead of the batched mat-vec kernel.
-    nonisolated(unsafe) static var gemmMinTokens = 32
+    /// Largest token count handled by the direct small-batch kernels (tiles of 8, at most 16). Above it the tensor-op GEMM wins on
+    /// hardware that has it (measured 16 tokens: 3.2 ms direct vs 4.2 ms tensor-op; 24 tokens: 6.1 vs 4.0).
+    nonisolated(unsafe) static var smallBatchMaxTokens = min(16, Tuning.int("ALPACA_SMALL_BATCH_MAX", 16))
+    nonisolated(unsafe) static var smallBatchEnabled = Tuning.int("ALPACA_DISABLE_SMALL_BATCH", 0) == 0
+    nonisolated(unsafe) static var gemmMinTokens = Tuning.int("ALPACA_GEMM_MIN", 32)
     /// Batches at least this large use the tensor-op GEMM when `.fast` precision is selected and supported.
-    nonisolated(unsafe) static var tensorGEMMMinTokens = Tuning.int("ALPACA_TENSOR_MIN_TOKENS", 16)
+    nonisolated(unsafe) static var tensorGEMMMinTokens = Tuning.int("ALPACA_TENSOR_MIN_TOKENS", 17)
     /// The tensor-op GEMMs run with a 128-token tile (instead of 64) when the matrix has at least `bigTileMinElements` weights and the chunk
     /// has at least `bigTileMinTokens` tokens: the larger tile halves the weight and activation traffic per FLOP, which is what limits
     /// large models (1.7B: prefill 1.5-2x faster), but under-fills the GPU for small matrices and short chunks (135M/360M regress).
@@ -148,13 +152,8 @@ struct KernelEncoder {
     }
 
     func embed(tokens: MTLBuffer, tokensOffset: Int, table: GPUMatrix, out: MTLBuffer, count: Int) throws {
-        let name: String
-        switch table.dtype {
-        case .float16: name = "embed_f16"
-        case .q8_0: name = "embed_q8_0"
-        case .q4_0: name = "embed_q4_0"
-        case .float32: throw MetalError.unsupported("f32 embedding tables")
-        }
+        guard table.dtype != .float32 else { throw MetalError.unsupported("f32 embedding tables") }
+        let name = "embed_" + table.dtype.description
         let p = try context.pipeline(name)
         encoder.setComputePipelineState(p)
         encoder.setBuffer(tokens, offset: tokensOffset, index: 0)
@@ -178,7 +177,7 @@ struct KernelEncoder {
     private func expandToHalf(_ w: GPUMatrix, into target: MTLBuffer?) throws -> (MTLBuffer, Int) {
         guard w.dtype != .float16 else { return (w.buffer, w.offset) }
         if let h = w.halfCopy { return (h, 0) }
-        let name = w.dtype == .q8_0 ? "dequant_q8_0_to_half" : "dequant_q4_0_to_half"
+        let name = "dequant_\(w.dtype.description)_to_half"
         let dp = try context.pipeline(name)
         encoder.setComputePipelineState(dp)
         encoder.setBuffer(w.buffer, offset: w.offset, index: 0); encoder.setBuffer(target!, offset: 0, index: 1)
@@ -248,12 +247,18 @@ struct KernelEncoder {
 
     /// Y[tokens, rows] = X[tokens, cols] · Wᵀ
     func linear(_ w: GPUMatrix, x: MTLBuffer, xOffset: Int = 0, y: MTLBuffer, yOffset: Int = 0, tokens: Int, accumulate: Bool = false) throws {
-        let fmt: String
-        switch w.dtype {
-        case .float16: fmt = "f16"
-        case .q8_0: fmt = "q8_0"
-        case .q4_0: fmt = "q4_0"
-        case .float32: throw MetalError.unsupported("f32 weight matrices on Metal")
+        guard w.dtype != .float32 else { throw MetalError.unsupported("f32 weight matrices on Metal") }
+        let fmt = w.dtype.description
+        if tokens >= 2 && tokens <= Self.smallBatchMaxTokens && Self.smallBatchEnabled && w.cols % 32 == 0 && w.rows % 8 == 0 {
+            let tiles = tokens <= 8 ? 8 : 16
+            let p = try context.pipeline("mm\(tiles)_\(fmt)")
+            encoder.setComputePipelineState(p)
+            encoder.setBuffer(w.buffer, offset: w.offset, index: 0)
+            encoder.setBuffer(x, offset: xOffset, index: 1)
+            encoder.setBuffer(y, offset: yOffset, index: 2)
+            set(UInt32(w.cols), 3); set(UInt32(w.rows), 4); set(UInt32(tokens), 5); set(UInt32(accumulate ? 1 : 0), 6)
+            encoder.dispatchThreadgroups(MTLSize(width: w.rows / 8, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+            return
         }
         if tokens >= Self.gemmMinTokens && w.cols % 32 == 0 {
             let p = try context.pipeline("mm_\(fmt)")
@@ -345,10 +350,10 @@ struct KernelEncoder {
 
 extension KernelEncoder {
     /// GPU greedy sampling: arg-max of `logits` → `chainToken` (next input) and `emitted[slot]`.
-    func argmax(logits: MTLBuffer, count: Int, chainToken: MTLBuffer, emitted: MTLBuffer, slot: Int) throws {
+    func argmax(logits: MTLBuffer, logitsOffset: Int = 0, count: Int, chainToken: MTLBuffer, emitted: MTLBuffer, slot: Int) throws {
         let p = try context.pipeline("argmax_logits")
         encoder.setComputePipelineState(p)
-        encoder.setBuffer(logits, offset: 0, index: 0)
+        encoder.setBuffer(logits, offset: logitsOffset, index: 0)
         set(UInt32(count), 1)
         encoder.setBuffer(chainToken, offset: 0, index: 2); encoder.setBuffer(emitted, offset: 0, index: 3)
         set(UInt32(slot), 4)
@@ -367,7 +372,7 @@ extension KernelEncoder {
 
     private func dispatchDecode(_ mats: [GPUMatrix], x: MTLBuffer, xOffset: Int, norm: (weight: GPUMatrix, eps: Float)?,
                                 outputs: [(MTLBuffer, Int)], flags: UInt32, rows: [Int]) {
-        let fmt = mats[0].dtype == .float16 ? "dec_f16" : (mats[0].dtype == .q8_0 ? "dec_q8_0" : "dec_q4_0")
+        let fmt = "dec_" + mats[0].dtype.description
         let pipeline = try! context.pipeline(fmt)
         encoder.setComputePipelineState(pipeline)
         for i in 0..<3 { let m = mats[min(i, mats.count - 1)]; encoder.setBuffer(m.buffer, offset: m.offset, index: i) }
@@ -388,9 +393,17 @@ extension KernelEncoder {
         dispatchDecode([w], x: x, xOffset: xOffset, norm: norm, outputs: [(out, outOffset)], flags: add ? 4 : 0, rows: [w.rows])
     }
 
-    /// q, k, v = Wq·xn, Wk·xn, Wv·xn in one dispatch (xn = RMS-normalised x).
+    /// q, k, v = Wq·xn, Wk·xn, Wv·xn (xn = RMS-normalised x): one dispatch when the three share a format, otherwise one dispatch per
+    /// run of equal formats (mixed-format files such as Q4_K_M store attn_v in a different type from attn_q / attn_k).
     func decodeQKV(_ wq: GPUMatrix, _ wk: GPUMatrix, _ wv: GPUMatrix, x: MTLBuffer, norm: (weight: GPUMatrix, eps: Float), q: MTLBuffer, k: MTLBuffer, v: MTLBuffer) {
-        dispatchDecode([wq, wk, wv], x: x, xOffset: 0, norm: norm, outputs: [(q, 0), (k, 0), (v, 0)], flags: 0, rows: [wq.rows, wk.rows, wv.rows])
+        let mats = [wq, wk, wv], outs = [q, k, v]
+        var i = 0
+        while i < 3 {
+            var j = i + 1
+            while j < 3 && mats[j].dtype == mats[i].dtype { j += 1 }
+            dispatchDecode(Array(mats[i..<j]), x: x, xOffset: 0, norm: norm, outputs: outs[i..<j].map { ($0, 0) }, flags: 0, rows: mats[i..<j].map { $0.rows })
+            i = j
+        }
     }
 
     /// out = silu(Wgate·xn) ⊙ (Wup·xn) in one dispatch.

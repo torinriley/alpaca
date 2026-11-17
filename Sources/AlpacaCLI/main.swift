@@ -116,6 +116,7 @@ func runGenerate(_ a: Args) async throws {
     c.topK = try a.int("top-k") ?? 0
     c.topP = try a.float("top-p") ?? 1
     c.seed = try a.int("seed").map { UInt64($0) }
+    c.lookupDraftTokens = try a.int("speculate") ?? 0
     let stream = model.generate(prompt: prompt, configuration: c)
     let task = Task { for try await t in stream { FileHandle.standardOutput.write(Data(t.text.utf8)) } }
     signal(SIGINT, SIG_IGN)
@@ -218,7 +219,7 @@ func runBench(_ a: Args) async throws {
 do {
     let argv = Array(CommandLine.arguments.dropFirst())
     guard let cmd = argv.first else { throw CLIError(description: "usage: alpaca <info|generate|bench> <model.gguf> [options]") }
-    let a = try Args(argv, valueOptions: ["prompt", "max-tokens", "temperature", "top-k", "top-p", "seed", "backend", "context", "kv", "memory-budget-mb",
+    let a = try Args(argv, valueOptions: ["prompt", "speculate", "max-tokens", "temperature", "top-k", "top-p", "seed", "backend", "context", "kv", "memory-budget-mb",
                                           "prompt-lengths", "decode", "runs", "context-sweep", "json", "tokens", "context-before", "prefill-batch"])
     switch cmd {
     case "info": try await runInfo(a)

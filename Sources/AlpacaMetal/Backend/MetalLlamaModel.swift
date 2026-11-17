@@ -72,7 +72,7 @@ public final class MetalLlamaModel: @unchecked Sendable {
         }
         func matrix(_ t: Tensor) throws -> GPUMatrix {
             guard t.dtype != .float32 else { throw MetalError.unsupported("f32 projection matrices (use f16, q8_0 or q4_0)") }
-            guard t.shape[1] % (t.dtype.isQuantized ? 32 : 8) == 0 else { throw MetalError.unsupported("input width \(t.shape[1]) is not a multiple of the kernel unit") }
+            guard t.shape[1] % (t.dtype.isQuantized ? t.dtype.blockElements : 8) == 0 else { throw MetalError.unsupported("input width \(t.shape[1]) is not a multiple of the kernel unit") }
             return try upload(t)
         }
         embedding = try matrix(weights.tokenEmbedding)
@@ -103,7 +103,7 @@ public final class MetalLlamaModel: @unchecked Sendable {
             guard w.dtype.isQuantized else { return w }
             var m = w
             let out = try context.makeBuffer(length: w.rows * w.cols * 2); total += w.rows * w.cols * 2
-            enc.setComputePipelineState(try context.pipeline(w.dtype == .q8_0 ? "dequant_q8_0_to_half" : "dequant_q4_0_to_half"))
+            enc.setComputePipelineState(try context.pipeline("dequant_\(w.dtype.description)_to_half"))
             enc.setBuffer(w.buffer, offset: w.offset, index: 0); enc.setBuffer(out, offset: 0, index: 1)
             var k = UInt32(w.cols); enc.setBytes(&k, length: 4, index: 2)
             enc.dispatchThreads(MTLSize(width: w.cols / 32 * 4, height: w.rows, depth: 1), threadsPerThreadgroup: MTLSize(width: min(w.cols / 32 * 4, 32), height: 8, depth: 1))
@@ -174,6 +174,9 @@ public final class MetalLlamaSession: @unchecked Sendable {
     /// `chainEmitted[step]`.
     private let chainToken: MTLBuffer
     private let chainEmitted: MTLBuffer
+    /// Logits of up to `maxVerifyTokens` rows for speculative verification.
+    private let logitsAll: MTLBuffer
+    public static let maxVerifyTokens = 8
     public let gemmPrecision: GEMMPrecision
     private let dequantScratch: MTLBuffer?
     private let dequantScratch2: MTLBuffer?
@@ -210,6 +213,7 @@ public final class MetalLlamaSession: @unchecked Sendable {
         gateHalf = eligible ? try ctx0.makeBuffer(length: maxBatch * c.feedForwardSize * 2) : nil
         qHalf = eligible ? try ctx0.makeBuffer(length: maxBatch * c.queryWidth * 2) : nil
         chainToken = try ctx0.makeBuffer(length: 16)
+        logitsAll = try ctx0.makeBuffer(length: Self.maxVerifyTokens * c.vocabSize * 4)
         chainEmitted = try ctx0.makeBuffer(length: (capacity + 8) * 4)
         guard let q = ctx0.device.makeCommandQueue() else { throw MetalError.commandFailed("could not create command queue") }
         queue = q
@@ -217,6 +221,33 @@ public final class MetalLlamaSession: @unchecked Sendable {
     }
 
     public func reset() { busy.lock(); length = 0; busy.unlock() }
+
+    /// Drops cached positions beyond `newLength` (rows past `length` are never read, so this is just a counter change).
+    public func truncate(to newLength: Int) {
+        busy.lock(); defer { busy.unlock() }
+        length = max(0, min(length, newLength))
+    }
+
+    /// Speculative verification: feeds `tokens` (1...maxVerifyTokens) at positions `length...` and returns the greedy next token
+    /// after each of them (`result[i]` = arg-max of the logits after feeding `tokens[0...i]`). `length` advances by
+    /// `tokens.count`; callers keep the accepted prefix and `truncate(to:)` the rest. One weight pass serves all rows.
+    public func verifyGreedy(tokens: [Int32]) throws -> [Int32] {
+        guard busy.try() else { throw MetalError.invalidArgument("session is already executing a forward pass") }
+        defer { busy.unlock() }
+        let c = model.config, n = tokens.count
+        guard n >= 1, n <= Self.maxVerifyTokens, n <= maxBatch else { throw MetalError.invalidArgument("verify needs 1...\(Self.maxVerifyTokens) tokens") }
+        guard length + n <= capacity else { throw MetalError.invalidArgument("context exhausted") }
+        guard tokens.allSatisfy({ $0 >= 0 && Int($0) < c.vocabSize }) else { throw MetalError.invalidArgument("token id outside vocabulary of \(c.vocabSize)") }
+        tokens.withUnsafeBytes { _ = memcpy(tokenBuffer.contents(), $0.baseAddress!, $0.count) }
+        let rowBytes = c.kvWidth * kvPrecision.bytesPerElement, tail = length + n
+        for b in kCache + vCache { memset(b.contents() + tail * rowBytes, 0, KernelEncoder.kvPaddingRows * rowBytes) }
+        let provider = try EncoderProvider(context: model.context, queue: queue, profile: false, precision: gemmPrecision, scratch: dequantScratch, scratch2: dequantScratch2)
+        try encodeChunk(provider, tokens: tokenBuffer, tokenOffset: 0, count: n, startPosition: length, computeLogits: true, allRows: true)
+        let result = try provider.finish()
+        lastGPUSeconds = result.gpuSeconds
+        length += n
+        return (0..<n).map { chainEmitted.contents().load(fromByteOffset: $0 * 4, as: Int32.self) }
+    }
 
     /// Appends one token and returns a view of the next-token logits, valid until the next call on this session
     /// (no copy: the view aliases the GPU's shared-memory logits buffer).
@@ -304,7 +335,7 @@ public final class MetalLlamaSession: @unchecked Sendable {
         return Array(UnsafeBufferPointer(start: logits.contents().assumingMemoryBound(to: Float.self), count: c.vocabSize))
     }
 
-    private func encodeChunk(_ p: EncoderProvider, tokens tokenSource: MTLBuffer, tokenOffset: Int, count n: Int, startPosition: Int, computeLogits: Bool) throws {
+    private func encodeChunk(_ p: EncoderProvider, tokens tokenSource: MTLBuffer, tokenOffset: Int, count n: Int, startPosition: Int, computeLogits: Bool, allRows: Bool = false) throws {
         let c = model.config, h = c.hiddenSize
         try p.stage("embed").embed(tokens: tokenSource, tokensOffset: tokenOffset * 4, table: model.embedding, out: x, count: n)
         // Chunks of at least `tensorGEMMMinTokens` tokens keep GEMM inputs in half precision end to end (norm, attention and
@@ -341,8 +372,9 @@ public final class MetalLlamaSession: @unchecked Sendable {
                 try p.stage("ffn down (+residual)").projectHalf(l.wDown, xHalf: gateH, y: x, tokens: n, accumulate: true)
                 continue
             }
-            if [[l.wq, l.wk, l.wv], [l.wo], [l.wGate, l.wUp], [l.wDown]].allSatisfy({ KernelEncoder.canFuseDecode($0, tokens: n) }) {
-                // Single-token path: 6 dispatches per layer instead of 13 (norms, residuals, SiLU and RoPE folded into neighbours).
+            if [l.wq, l.wk, l.wv, l.wo, l.wGate, l.wUp, l.wDown].allSatisfy({ KernelEncoder.canFuseDecode([$0], tokens: n) }) {
+                // Single-token path: 6 dispatches per layer instead of 13 (norms, residuals, SiLU and RoPE folded into neighbours;
+                // a few more when a file mixes quantisation types within a layer).
                 p.stage("qkv (fused norm)").decodeQKV(l.wq, l.wk, l.wv, x: x, norm: (l.attnNorm, c.rmsNormEps), q: q, k: k, v: v)
                 try p.stage("rope + kv store").ropeQKVStore(q: q, k: k, v: v, kCache: kCache[i], vCache: vCache[i], freqs: model.ropeFreqs,
                                                             heads: c.headCount, kvHeads: c.kvHeadCount, headDim: c.headDim,
@@ -350,7 +382,14 @@ public final class MetalLlamaSession: @unchecked Sendable {
                 try p.stage("attention").attention(q: q, kCache: kCache[i], vCache: vCache[i], out: ctx, heads: c.headCount, kvHeads: c.kvHeadCount,
                                                    headDim: c.headDim, startPosition: startPosition, tokens: 1, kv: kvPrecision, decodeScratch: decodeScratch)
                 p.stage("attn out projection (+residual)").decodeProjection(l.wo, x: ctx, out: x, add: true)
-                p.stage("ffn gate+up+silu (fused norm)").decodeGateUp(l.wGate, l.wUp, x: x, norm: (l.ffnNorm, c.rmsNormEps), out: gate)
+                if l.wGate.dtype == l.wUp.dtype {
+                    p.stage("ffn gate+up+silu (fused norm)").decodeGateUp(l.wGate, l.wUp, x: x, norm: (l.ffnNorm, c.rmsNormEps), out: gate)
+                } else {
+                    let gu = p.stage("ffn gate+up+silu (fused norm)")
+                    gu.decodeProjection(l.wGate, x: x, norm: (l.ffnNorm, c.rmsNormEps), out: gate)
+                    gu.decodeProjection(l.wUp, x: x, norm: (l.ffnNorm, c.rmsNormEps), out: up)
+                    try gu.siluMul(gate: gate, up: up, out: gate, count: c.feedForwardSize)
+                }
                 p.stage("ffn down (+residual)").decodeProjection(l.wDown, x: gate, out: x, add: true)
                 continue
             }
@@ -370,7 +409,15 @@ public final class MetalLlamaSession: @unchecked Sendable {
             try p.stage("ffn gate+up+silu").gateUpSilu(l.wGate, l.wUp, x: xn, out: gate, scratchUp: up, tokens: n)
             try p.stage("ffn down (+residual)").linearAdd(l.wDown, x: gate, residual: x, tokens: n)
         }
-        if computeLogits {
+        if computeLogits && allRows {
+            // Speculative verification: logits for every row, arg-max per row on the GPU.
+            let fin = p.stage("final norm + logits")
+            try fin.rmsNorm(x, weight: model.outputNorm.buffer, weightOffset: model.outputNorm.offset, out: xn, rows: n, dim: h, eps: c.rmsNormEps)
+            try fin.linear(model.output, x: xn, y: logitsAll, tokens: n)
+            for r in 0..<n {
+                try p.stage("sample").argmax(logits: logitsAll, logitsOffset: r * c.vocabSize * 4, count: c.vocabSize, chainToken: chainToken, emitted: chainEmitted, slot: r)
+            }
+        } else if computeLogits {
             // Only the final position's logits are needed: normalise and project that single row.
             let fin = p.stage("final norm + logits")
             if KernelEncoder.canFuseDecode([model.output], tokens: 1) {

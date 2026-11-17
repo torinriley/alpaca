@@ -46,7 +46,7 @@ inline float dec_row_dot(device const uchar* row, threadgroup const float* xs, u
             threadgroup const float4* x4 = (threadgroup const float4*)(xs + b * Q_BLOCK + h * 16);
             acc += d * (dot(float4(q[0]), x4[0]) + dot(float4(q[1]), x4[1]) + dot(float4(q[2]), x4[2]) + dot(float4(q[3]), x4[3]));
         }
-    } else {                                          // q4_0
+    } else if (FMT == 2) {                            // q4_0
         for (uint u = lane; u < (K / Q_BLOCK) * 2; u += SIMD_WIDTH) {
             uint b = u >> 1, h = u & 1;
             device const uchar* p = row + (ulong)b * Q4_BYTES;
@@ -61,12 +61,19 @@ inline float dec_row_dot(device const uchar* row, threadgroup const float* xs, u
             threadgroup const float4* xh = (threadgroup const float4*)(xs + b * Q_BLOCK + 16 + h * 8);
             acc += d * (dot(lo0, xl[0]) + dot(lo1, xl[1]) + dot(hi0, xh[0]) + dot(hi1, xh[1]));
         }
+    } else {                                          // every other format: 8-element units through dq8
+        threadgroup const float4* x4 = (threadgroup const float4*)xs;
+        for (uint u = lane; u < K / 8; u += SIMD_WIDTH) {
+            float4 a, b;
+            dq8<FMT>(row, u, a, b);
+            acc += dot(a, x4[2 * u]) + dot(b, x4[2 * u + 1]);
+        }
     }
     return acc;
 }
 
 template <int FMT>
-inline uint dec_row_bytes(uint K) { return FMT == 0 ? K * 2 : (FMT == 1 ? (K / Q_BLOCK) * Q8_BYTES : (K / Q_BLOCK) * Q4_BYTES); }
+inline ulong dec_row_bytes(uint K) { return FMT == 0 ? K * 2 : (FMT == 1 ? (K / Q_BLOCK) * Q8_BYTES : (FMT == 2 ? (K / Q_BLOCK) * Q4_BYTES : fmt_row_bytes<FMT>(K))); }
 
 template <int FMT>
 inline void dec_impl(device const uchar* W0, device const uchar* W1, device const uchar* W2,
@@ -91,7 +98,7 @@ inline void dec_impl(device const uchar* W0, device const uchar* W1, device cons
     const bool silu = (P.flags & FLAG_SILU) != 0;
     const uint total = silu ? P.n0 : P.n0 + P.n1 + P.n2;
     if (r >= total) return;
-    const uint rb = dec_row_bytes<FMT>(K);
+    const ulong rb = dec_row_bytes<FMT>(K);
 
     if (silu) {
         float g = simd_sum(dec_row_dot<FMT>(W0 + (ulong)r * rb, xs, K, lane));
@@ -120,6 +127,15 @@ inline void dec_impl(device const uchar* W0, device const uchar* W1, device cons
 DEC_KERNEL(dec_f16, 0)
 DEC_KERNEL(dec_q8_0, 1)
 DEC_KERNEL(dec_q4_0, 2)
+DEC_KERNEL(dec_q4_1, 3)
+DEC_KERNEL(dec_q5_0, 4)
+DEC_KERNEL(dec_q5_1, 5)
+DEC_KERNEL(dec_q2_k, 6)
+DEC_KERNEL(dec_q3_k, 7)
+DEC_KERNEL(dec_q4_k, 8)
+DEC_KERNEL(dec_q5_k, 9)
+DEC_KERNEL(dec_q6_k, 10)
+DEC_KERNEL(dec_bf16, 11)
 
 // RoPE of q (in place) and RoPE + cache append of k, v in a single dispatch (decode: one token).
 // Grid: (headDim/2, heads + kvHeads, tokens). y < heads rotates q head y; otherwise processes KV head y - heads.

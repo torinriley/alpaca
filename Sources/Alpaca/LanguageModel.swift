@@ -289,14 +289,46 @@ public final class LanguageModel: @unchecked Sendable {
         do { next = try sampler.sample(logits: logits) } catch { throw AlpacaError.inferenceFailed("\(error)") }
         var running = accept(next)
         if running, c.temperature == 0, !Self.greedyChainDisabled {
+            let maxDraft = min(max(c.lookupDraftTokens, 0), MetalLlamaSession.maxVerifyTokens - 1)
+            var drafter = maxDraft > 0 ? NGramDrafter(history: promptTokens, maxDraft: maxDraft) : nil
+            drafter?.append(next)
             // Greedy: the sampling loop runs on the GPU with several steps in flight; the CPU only streams tokens out.
-            var stoppedByCaller = false
-            let fed = try session.decodeGreedy(startToken: next, maxSteps: c.maxTokens - generated) { token in
-                let keepGoing = accept(token)
-                if !keepGoing { stoppedByCaller = true }
-                return keepGoing
+            // With lookup drafting the chain pauses whenever the recent n-gram has appeared before, and the proposed
+            // continuation is verified in one batched pass.
+            var cooldown = 0, misses = 0           // back-off after drafts the model rejects, so non-repetitive text pays ~nothing
+            speculate: while running {
+                var stoppedByCaller = false, draft: [Int32] = []
+                let fed = try session.decodeGreedy(startToken: next, maxSteps: c.maxTokens - generated) { token in
+                    next = token
+                    let keepGoing = accept(token)
+                    if !keepGoing { stoppedByCaller = true; return false }
+                    if drafter != nil {
+                        drafter!.append(token)
+                        if cooldown > 0 { cooldown -= 1; return true }
+                        draft = drafter!.propose()
+                        if !draft.isEmpty { return false }
+                    }
+                    return true
+                }
+                guard fed != nil else { break speculate }                  // backend cannot chain: fall through to the plain loop
+                if stoppedByCaller { running = false; break }
+                if draft.isEmpty { running = false; reason = .contextFull; break }
+                // Verify: feed next + draft, accept the longest prefix the model agrees with, plus one bonus token.
+                if session.length + 1 + draft.count > session.capacity { break speculate }
+                let base = session.length
+                guard let preds = try session.verifyGreedy(tokens: [next] + draft) else { break speculate }
+                var m = 0
+                while m < draft.count && preds[m] == draft[m] { m += 1 }
+                session.truncate(to: base + 1 + m)
+                if m >= 2 { misses = 0 } else { misses = min(misses + 1, 4); cooldown = 8 << misses }
+                for i in 0...m {
+                    let t = preds[i]
+                    next = t
+                    if !accept(t) { running = false; break speculate }
+                    drafter?.append(t)
+                }
+                if generated >= c.maxTokens { running = false; break }
             }
-            if fed != nil { running = false; if !stoppedByCaller { reason = .contextFull } }
         }
         while running {
             if session.length >= session.capacity { reason = .contextFull; break }
@@ -312,6 +344,41 @@ public final class LanguageModel: @unchecked Sendable {
     }
 }
 
+/// Prompt-lookup drafting: proposes the tokens that followed the most recent earlier occurrence of the last 5 tokens.
+struct NGramDrafter {
+    private var tokens: [Int32]
+    private var index: [UInt64: Int] = [:]      // hash of a 5-gram → position right after its latest occurrence
+    private let maxDraft: Int
+    private static let n = 5
+    private var lastKeyHit: Int?
+
+    init(history: [Int32], maxDraft: Int) {
+        self.tokens = []; self.maxDraft = maxDraft
+        self.tokens.reserveCapacity(history.count + 512)
+        for t in history { append(t) }
+    }
+
+    private func key(endingAt i: Int) -> UInt64? {
+        guard i >= Self.n - 1 else { return nil }
+        var h: UInt64 = 1469598103934665603
+        for j in (i - Self.n + 1)...i { h = (h ^ UInt64(UInt32(bitPattern: tokens[j]))) &* 1099511628211 }
+        return h
+    }
+
+    mutating func append(_ t: Int32) {
+        tokens.append(t)
+        guard let k = key(endingAt: tokens.count - 1) else { lastKeyHit = nil; return }
+        lastKeyHit = index[k]                      // earlier occurrence (before this one is recorded)
+        index[k] = tokens.count
+    }
+
+    /// Continuation after the earlier occurrence matched by the last `append`, or empty.
+    func propose() -> [Int32] {
+        guard let p = lastKeyHit, p < tokens.count - 1 else { return [] }
+        return Array(tokens[p..<min(p + maxDraft, tokens.count - 1)])
+    }
+}
+
 // MARK: - Backend adapters
 
 protocol InferenceSession: AnyObject {
@@ -324,6 +391,9 @@ protocol InferenceSession: AnyObject {
     func decode<R>(token: Int32, _ body: (UnsafeBufferPointer<Float>) throws -> R) throws -> R
     /// GPU-resident greedy decoding (Metal only): nil if the backend cannot do it. See `MetalLlamaSession.decodeGreedy`.
     func decodeGreedy(startToken: Int32, maxSteps: Int, emit: (Int32) -> Bool) throws -> Int?
+    /// Metal only: greedy next token after each of `tokens` (≤ 8), advancing `length` by `tokens.count`; nil if unsupported.
+    func verifyGreedy(tokens: [Int32]) throws -> [Int32]?
+    func truncate(to length: Int)
     func reset()
 }
 
@@ -346,6 +416,11 @@ final class MetalSessionAdapter: InferenceSession {
         defer { gpuSeconds += session.lastGPUSeconds }
         return try session.decodeGreedy(startToken: startToken, maxSteps: maxSteps, emit: emit)
     }
+    func verifyGreedy(tokens: [Int32]) throws -> [Int32]? {
+        defer { gpuSeconds += session.lastGPUSeconds }
+        return try session.verifyGreedy(tokens: tokens)
+    }
+    func truncate(to length: Int) { session.truncate(to: length) }
 }
 
 final class CPUSessionAdapter: InferenceSession {
@@ -362,4 +437,6 @@ final class CPUSessionAdapter: InferenceSession {
         return try logits.withUnsafeBufferPointer(body)
     }
     func decodeGreedy(startToken: Int32, maxSteps: Int, emit: (Int32) -> Bool) throws -> Int? { nil }
+    func verifyGreedy(tokens: [Int32]) throws -> [Int32]? { nil }
+    func truncate(to length: Int) {}
 }

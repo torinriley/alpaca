@@ -23,9 +23,9 @@ public struct LoadedLlama: Sendable {
 
 /// Maps a GGUF file with `general.architecture == "llama"` to `LlamaConfig` + `LlamaWeights`.
 ///
-/// Supported on-disk tensor types: F32 (norms), F16, Q8_0, Q4_0 are used in place from the mapping.
-/// Q4_1 weights (llama.cpp falls back to Q4_1 for some tensors in Q4_0 files) are expanded to F16 at load time and
-/// reported in `LoadReport.notes`. Anything else is rejected with `GGUFError.unsupportedTensorType`.
+/// Supported on-disk tensor types, all used in place from the mapping (no conversion, no copy): F32 (norms), F16, BF16,
+/// Q8_0, Q5_0, Q5_1, Q4_0, Q4_1 and the K-quants Q2_K, Q3_K, Q4_K, Q5_K, Q6_K. Anything else (e.g. IQ-quants) is rejected with
+/// `GGUFError.unsupportedTensorType`.
 /// RoPE: GGUF Llama weights use the interleaved (adjacent-pair) layout; rope scaling is not implemented and is rejected.
 public enum LlamaLoader {
     public static func load(url: URL) throws -> LoadedLlama {
@@ -77,12 +77,6 @@ public enum LlamaLoader {
                 report.mappedWeightBytes += info.byteCount
                 return try file.tensor(named: name)
             }
-            if info.type == .q4_1 {
-                let t = try expandQ4_1ToF16(file: file, info: info)
-                report.convertedWeightBytes += t.storage.byteCount
-                report.notes.append("\(name): Q4_1 expanded to F16 at load (\(info.byteCount) -> \(t.storage.byteCount) bytes)")
-                return t
-            }
             throw GGUFError.unsupportedTensorType(id: info.type.rawValue, tensor: name)
         }
 
@@ -103,24 +97,5 @@ public enum LlamaLoader {
             output: file.info(for: "output.weight") != nil ? try weight("output.weight") : nil)
         do { try weights.validate(against: config) } catch { throw GGUFError.malformed("\(error)") }
         return LoadedLlama(config: config, weights: weights, file: file, report: report)
-    }
-
-    /// Q4_1 block: Float16 d, Float16 m, 16 bytes of nibbles (low nibble = element j, high = element j+16); value = d*q + m.
-    static func expandQ4_1ToF16(file: GGUFFile, info: GGUFTensorInfo) throws -> Tensor {
-        let out = try Tensor(zeros: info.shape, dtype: .float16)
-        let src = file.rawBytes(of: info)
-        let blocks = info.elementCount / 32
-        try out.withFloat16 { dst in
-            for b in 0..<blocks {
-                let p = src.baseAddress! + b * 20
-                let d = Float(p.loadUnaligned(as: Float16.self)), m = Float((p + 2).loadUnaligned(as: Float16.self))
-                let q = (p + 4).assumingMemoryBound(to: UInt8.self)
-                for j in 0..<16 {
-                    dst[b * 32 + j] = Float16(d * Float(q[j] & 0x0F) + m)
-                    dst[b * 32 + j + 16] = Float16(d * Float(q[j] >> 4) + m)
-                }
-            }
-        }
-        return out
     }
 }

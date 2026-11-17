@@ -2,6 +2,12 @@
 
 *Author: Torin Etheridge · 2026-10-09 · MIT License*
 
+## Unreleased
+
+- **More weight formats, all native on CPU and Metal:** Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K and BF16 (Q4_1 is no longer expanded to F16 at load). See [Docs/FORMATS.md](Docs/FORMATS.md).
+- **Faster short prompts:** a direct simdgroup-matrix kernel for 2–16 tokens replaces the mat-vec / tensor-op path there (16-token prefill about 1.3× faster on an M5; the tensor-op path now starts at 17 tokens).
+- **Opt-in prompt-lookup speculative decoding** for greedy generation (`GenerationConfiguration.lookupDraftTokens`, `--speculate N`); output is identical to plain greedy decoding.
+
 ## 0.2.0 — 2026-11-10 (pre-release)
 
 ### Performance: GEMM Scaling

@@ -37,6 +37,15 @@ public enum GGMLType: UInt32, Sendable {
         case .f16: return .float16
         case .q8_0: return .q8_0
         case .q4_0: return .q4_0
+        case .q4_1: return .q4_1
+        case .q5_0: return .q5_0
+        case .q5_1: return .q5_1
+        case .q2_K: return .q2_K
+        case .q3_K: return .q3_K
+        case .q4_K: return .q4_K
+        case .q5_K: return .q5_K
+        case .q6_K: return .q6_K
+        case .bf16: return .bfloat16
         default: return nil
         }
     }
